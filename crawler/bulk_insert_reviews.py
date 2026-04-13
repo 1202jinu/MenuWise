@@ -1,46 +1,62 @@
-import oracledb
+from database_and_crawler import MenuWiseDB, ReviewCrawler
 
-reviews_data = [
-    (2, 1, "된장찌개가 구수하고 가격도 괜찮아요."),
-    (3, 1, "김치찌개가 얼큰해서 좋았는데 조금 짰어요."),
-    (4, 1, "된장찌개 양이 많고 맛도 무난했어요."),
-]
 
-feedback_data = [
-    (2, 2, 5, 1),
-    (3, 3, 7, 2),
-    (4, 4, 3, 0),
-]
+def build_core_info():
+    """AI 연동 전 단계이므로 테스트용 요약 데이터 생성"""
+    return [
+        {
+            "menu_id": "M001",
+            "content": "얼큰하고 자극적인 맛이 강함",
+            "info_type": "PROS",
+            "level": 1,
+            "upvotes": 3,
+            "downvotes": 0
+        },
+        {
+            "menu_id": "M001",
+            "content": "조금 짠 편이라는 의견이 있음",
+            "info_type": "CONS",
+            "level": 2,
+            "upvotes": 1,
+            "downvotes": 2
+        },
+        {
+            "menu_id": "M002",
+            "content": "구수하고 가격이 괜찮음",
+            "info_type": "PROS",
+            "level": 1,
+            "upvotes": 4,
+            "downvotes": 0
+        },
+        {
+            "menu_id": "M002",
+            "content": "맛이 무난해서 호불호가 적음",
+            "info_type": "PROS",
+            "level": 2,
+            "upvotes": 2,
+            "downvotes": 0
+        }
+    ]
 
-try:
-    conn = oracledb.connect(
-        user="c##hr",
-        password="hr1234",
-        dsn="localhost:1521/xe"
-    )
 
-    cursor = conn.cursor()
+def main():
+    db = MenuWiseDB()
+    crawler = ReviewCrawler()
 
-    # 리뷰 여러 개 저장
-    for review in reviews_data:
-        cursor.execute("""
-            INSERT INTO reviews (id, restaurant_id, content)
-            VALUES (:1, :2, :3)
-        """, review)
+    restaurant_list = crawler.crawl_restaurant_info("강원대")
 
-    # 피드백 여러 개 저장
-    for feedback in feedback_data:
-        cursor.execute("""
-            INSERT INTO review_feedback (id, review_id, likes, dislikes)
-            VALUES (:1, :2, :3, :4)
-        """, feedback)
+    for res_data in restaurant_list:
+        reviews = crawler.crawl_reviews(res_data["restaurant"]["res_id"])
+        res_data["reviews"] = reviews
+        res_data["core_info"] = build_core_info()
 
-    conn.commit()
+        db.save_restaurant_data(res_data)
 
-    print("리뷰 및 피드백 여러 개 저장 완료")
+    print("테스트 데이터 삽입 완료")
+    print("반경 3km 내 식당:", db.get_nearby_restaurants(37.5665, 126.9780, 3))
 
-    cursor.close()
-    conn.close()
+    db.close()
 
-except Exception as e:
-    print("오류 발생:", e)
+
+if __name__ == "__main__":
+    main()
