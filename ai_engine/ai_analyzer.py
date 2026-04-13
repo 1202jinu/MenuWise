@@ -1,14 +1,21 @@
+import json
 import openai
 from sentence_transformers import SentenceTransformer
 
 
-class MenuAIAnalyzer:
+class MenuAIProcessor:
     def __init__(self, api_key):
         """LLM + 벡터 모델 초기화"""
+        self.api_key = api_key
         self.client = openai.OpenAI(api_key=api_key)
-        self.vector_model = SentenceTransformer('snunlp/KR-SBERT-V40K-klueNLI-augSTS')
 
-    def generate_hierarchical_summary(self, menu_name, reviews):
+        # 한국어 벡터 모델
+        self.vector_model = SentenceTransformer(
+            'snunlp/KR-SBERT-V40K-klueNLI-augSTS'
+        )
+
+    # --- TODO: 박진우 구현 영역 ---
+    def analyze_reviews(self, menu_name, reviews) -> dict:
         """
         [Level 1 & 2 생성]
         리뷰를 분석하여 JSON 형태의 요약 생성
@@ -25,33 +32,49 @@ class MenuAIAnalyzer:
                 "cons": "대표 단점 한 줄"
             }},
             "level_2": [
-                {{ "content": "상세 장점", "type": "PROS" }},
-                {{ "content": "상세 단점", "type": "CONS" }}
+                {{ "content": "상세 내용", "type": "PROS" }},
+                {{ "content": "상세 내용", "type": "CONS" }}
             ]
         }}
         """
 
-        response = self.client.chat.completions.create(
-            model="gpt-4-turbo",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3
-        )
+        try:
+            response = self.client.chat.completions.create(
+                model="gpt-4o-mini",  # 추천 모델
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3
+            )
 
-        return response.choices[0].message.content
+            raw = response.choices[0].message.content.strip()
 
-    def find_best_menu_photo(self, menu_name, photo_urls):
+            # JSON 정제
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            raw = raw.strip()
+
+            result = json.loads(raw)
+
+        except Exception:
+            # 실패 시 fallback
+            result = {
+                "level_1": {"pros": "", "cons": ""},
+                "level_2": []
+            }
+
+        return result
+
+    def match_photo(self, menu_name, image_urls) -> str:
         """
         [VLM 활용 사진 매칭]
         현재는 간단히 첫 번째 사진 반환 (추후 확장 예정)
         """
 
-        if not photo_urls:
+        if not image_urls:
             return "default_url"
 
-        best_photo = photo_urls[0]
-
-        print(f"[AI] '{menu_name}' 대표 사진 선정 완료")
-        return best_photo
+        return image_urls[0]
 
     def vectorize_text(self, text_list):
         """
