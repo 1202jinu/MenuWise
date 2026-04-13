@@ -17,3 +17,15 @@
 - **main**: 최종 발표용
 - **develop**: 공용 작업장 (이 브랜치에서 작업하세요!)
 - **feat/역할번호-기능명**: 각 팀원 개별 작업 공간
+
+## 🔔 Running in local development
+
+1. UV(Python 패키지 관리자) 설치: [가이드](https://docs.astral.sh/uv/getting-started/installation/)
+2. UV 프로젝트 초기화
+  ```shell
+  uv sync
+  ```
+3. FastAPI 서버 실행
+  ```shell
+  uv run fastapi dev
+  ```
