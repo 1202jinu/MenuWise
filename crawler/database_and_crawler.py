@@ -241,3 +241,8 @@ class ReviewCrawler:
                 }
             ]
         return []
+
+def get_review_count(self, res_id):
+    cursor = self.conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM reviews WHERE res_id = ?", (res_id,))
+    return cursor.fetchone()[0]
