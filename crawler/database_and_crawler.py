@@ -12,7 +12,6 @@ class MenuWiseDB:
         """식당, 메뉴, 리뷰, 그리고 계층적 요약(CoreInfo) 테이블을 생성합니다."""
         cursor = self.conn.cursor()
 
-        # 식당 테이블
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS restaurants (
                 res_id TEXT PRIMARY KEY,
@@ -23,7 +22,6 @@ class MenuWiseDB:
             )
         """)
 
-        # 메뉴 테이블
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS menus (
                 menu_id TEXT PRIMARY KEY,
@@ -35,7 +33,6 @@ class MenuWiseDB:
             )
         """)
 
-        # 리뷰 원문 테이블
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS reviews (
                 review_id TEXT PRIMARY KEY,
@@ -48,9 +45,6 @@ class MenuWiseDB:
             )
         """)
 
-        # 핵심 요약 정보 테이블
-        # level: 1(대표 요약), 2(상세 정보)
-        # info_type: PROS(장점), CONS(단점)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS core_info (
                 info_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,7 +61,7 @@ class MenuWiseDB:
         self.conn.commit()
 
     def save_restaurant_data(self, res_data):
-        """크롤링한 식당 기본 정보와 위치(위도/경도)를 저장합니다."""
+        """크롤링한 식당, 메뉴, 리뷰, 핵심 요약 정보를 저장합니다."""
         cursor = self.conn.cursor()
 
         restaurant = res_data["restaurant"]
@@ -135,6 +129,7 @@ class MenuWiseDB:
         for row in rows:
             res_id, res_name, res_lat, res_lng, category = row
             dist = self._calculate_distance(lat, lng, res_lat, res_lng)
+
             if dist <= radius_km:
                 nearby.append({
                     "res_id": res_id,
@@ -146,14 +141,22 @@ class MenuWiseDB:
         nearby.sort(key=lambda x: x["distance_km"])
         return nearby
 
+    def get_review_count(self, res_id):
+        """특정 식당의 리뷰 개수를 조회합니다."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM reviews WHERE res_id = ?", (res_id,))
+        return cursor.fetchone()[0]
+
     def update_feedback(self, info_id, is_upvote):
         """사용자가 누른 추천/비추천 수치를 DB 컬럼에 실시간 반영합니다."""
         cursor = self.conn.cursor()
         column = "upvotes" if is_upvote else "downvotes"
+
         cursor.execute(
             f"UPDATE core_info SET {column} = {column} + 1 WHERE info_id = ?",
             (info_id,)
         )
+
         self.conn.commit()
 
     def _calculate_distance(self, lat1, lon1, lat2, lon2):
@@ -171,6 +174,7 @@ class MenuWiseDB:
             * math.cos(math.radians(lat2))
             * math.sin(dlon / 2) ** 2
         )
+
         c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
         return r * c
 
@@ -240,9 +244,5 @@ class ReviewCrawler:
                     "photo_url": None
                 }
             ]
-        return []
 
-def get_review_count(self, res_id):
-    cursor = self.conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM reviews WHERE res_id = ?", (res_id,))
-    return cursor.fetchone()[0]
+        return []
