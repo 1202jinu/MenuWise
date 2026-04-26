@@ -146,6 +146,11 @@ class MenuWiseDB:
         cursor = self.conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM reviews WHERE res_id = ?", (res_id,))
         return cursor.fetchone()[0]
+    def get_menu_review_count(self, menu_id):
+        """특정 메뉴의 리뷰 개수를 조회합니다."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM reviews WHERE menu_id = ?", (menu_id,))
+        return cursor.fetchone()[0]
 
     def update_feedback(self, info_id, is_upvote):
         """사용자가 누른 추천/비추천 수치를 DB 컬럼에 실시간 반영합니다."""
