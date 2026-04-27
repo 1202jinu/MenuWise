@@ -5,7 +5,7 @@ import math
 class MenuWiseDB:
     def __init__(self, db_path="menu_wise.db"):
         """데이터베이스 초기화 및 테이블 생성을 위해 만든 생성자입니다."""
-        self.conn = sqlite3.connect(db_path)
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.init_tables()
 
     def init_tables(self):
