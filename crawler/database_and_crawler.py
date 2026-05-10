@@ -1,11 +1,12 @@
 import sqlite3
 import math
+import re
 
 
 class MenuWiseDB:
     def __init__(self, db_path="menu_wise.db"):
         """데이터베이스 초기화 및 테이블 생성을 위해 만든 생성자입니다."""
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.conn = sqlite3.connect(db_path)
         self.init_tables()
 
     def init_tables(self):
@@ -59,6 +60,16 @@ class MenuWiseDB:
         """)
 
         self.conn.commit()
+    def clean_review_text(self, text):
+        """리뷰 원문에서 불필요한 공백과 특수문자를 정리합니다."""
+        if text is None:
+            return ""
+
+        text = text.strip()
+        text = re.sub(r"\s+", " ", text)
+        text = re.sub(r"[^가-힣a-zA-Z0-9\s.,!?]", "", text)
+
+        return text
 
     def save_restaurant_data(self, res_data):
         """크롤링한 식당, 메뉴, 리뷰, 핵심 요약 정보를 저장합니다."""
@@ -93,14 +104,25 @@ class MenuWiseDB:
             ))
 
         for review in reviews:
+            cleaned_content = self.clean_review_text(review.get("content"))
+
+            if len(cleaned_content) < 5:
+                continue
+
             cursor.execute("""
-                INSERT OR REPLACE INTO reviews (review_id, res_id, menu_id, content, photo_url)
+                INSERT OR REPLACE INTO reviews (
+                    review_id,
+                    res_id,
+                    menu_id,
+                    content,
+                    photo_url
+                )
                 VALUES (?, ?, ?, ?, ?)
             """, (
                 review["review_id"],
                 restaurant["res_id"],
                 review.get("menu_id"),
-                review["content"],
+                cleaned_content,
                 review.get("photo_url")
             ))
 
@@ -140,6 +162,61 @@ class MenuWiseDB:
 
         nearby.sort(key=lambda x: x["distance_km"])
         return nearby
+    
+    def get_restaurants_by_category(self, category):
+        """카테고리 기준으로 식당을 조회합니다."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT res_id, res_name, lat, lng, category
+            FROM restaurants
+            WHERE category = ?
+        """, (category,))
+
+        rows = cursor.fetchall()
+
+        restaurants = []
+        for row in rows:
+            res_id, res_name, lat, lng, category = row
+            restaurants.append({
+                "res_id": res_id,
+                "res_name": res_name,
+                "lat": lat,
+                "lng": lng,
+                "category": category
+            })
+
+        return restaurants
+    
+    def get_top_restaurants_by_upvotes(self):
+        """추천 수 기준 인기 식당 조회"""
+        cursor = self.conn.cursor()
+
+        cursor.execute("""
+            SELECT
+                restaurants.res_id,
+                restaurants.res_name,
+                restaurants.category,
+                SUM(core_info.upvotes) as total_upvotes
+            FROM restaurants
+            JOIN menus ON restaurants.res_id = menus.res_id
+            JOIN core_info ON menus.menu_id = core_info.menu_id
+            GROUP BY restaurants.res_id
+            ORDER BY total_upvotes DESC
+        """)
+
+        rows = cursor.fetchall()
+
+        result = []
+
+        for row in rows:
+            result.append({
+                "res_id": row[0],
+                "res_name": row[1],
+                "category": row[2],
+                "total_upvotes": row[3]
+            })
+
+        return result
 
     def get_review_count(self, res_id):
         """특정 식당의 리뷰 개수를 조회합니다."""
