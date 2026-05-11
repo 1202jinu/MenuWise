@@ -2,7 +2,7 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from crawler.database_and_crawler import MenuWiseDB
-from ai.ai_analyzer import MenuAIProcessor          # [수정 1] 실제 파일명으로 import 경로 수정
+from ai_engine.ai_analyzer import MenuAIProcessor   # [수정 1] 실제 파일명으로 import 경로 수정
 from typing import Optional
 import os
 
