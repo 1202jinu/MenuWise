@@ -48,6 +48,13 @@ def main():
     print("리뷰 개수:", db.get_review_count("R001"))
     print("김치찌개 리뷰 개수:", db.get_menu_review_count("M001"))
     print("된장찌개 리뷰 개수:", db.get_menu_review_count("M002"))
+    print("리뷰 전처리 기능 적용 완료")
+    print("한식 식당 조회:", db.get_restaurants_by_category("한식"))
+    print("추천 수 기준 인기 식당:", db.get_top_restaurants_by_upvotes())
+    print("키워드 기반 메뉴 검색:", db.search_menus("한식", 37.5665, 126.9780, 3))
+    details = db.get_menu_details("M001")
+    print("메뉴 상세 조회:", details["menu_name"], "/", details["restaurant"]["res_name"])
+    print("핵심 요약 개수:", len(details["core_info"]))
 
     db.close()
 
