@@ -265,3 +265,4 @@ async def vote(request: VoteRequest):
         return {"message": "투표가 반영되었습니다.", "info_id": request.info_id, "upvote": request.upvote}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"투표 처리 중 오류 발생: {str(e)}")
+        
