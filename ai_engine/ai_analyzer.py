@@ -1,20 +1,36 @@
 import json
 import re
 import openai
+import os
+from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
 import numpy as np
 
 
 class MenuAIProcessor:
-    def __init__(self, api_key):
+
+    # Singleton 벡터 모델
+    _shared_vector_model = None
+
+    def __init__(self, api_key=None):
         """LLM + 벡터 모델 초기화"""
+        # .env 환경 변수 로드
+        load_dotenv()
+
+        # api_key가 없으면 .env에서 로드
+        if api_key is None:
+            api_key = os.getenv("OPENAI_API_KEY")
+
         self.api_key = api_key
+        self.llm_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
         self.client = openai.OpenAI(api_key=api_key)
 
-        # SBERT 모델 (키워드 검색용)
-        self.vector_model = SentenceTransformer(
+        if MenuAIProcessor._shared_vector_model is None:
+            MenuAIProcessor._shared_vector_model = SentenceTransformer(
             'snunlp/KR-SBERT-V40K-klueNLI-augSTS'
         )
+
+        self.vector_model = MenuAIProcessor._shared_vector_model
 
     # --- TODO: 박진우 구현 영역 ---
     def analyze_reviews(self, menu_name, reviews) -> dict:
@@ -52,13 +68,7 @@ class MenuAIProcessor:
         """
 
         try:
-            response = self.client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2  # 일관성 ↑
-            )
-
-            raw = response.choices[0].message.content.strip()
+            raw = self._generate_summary_with_llm(prompt)
 
             # JSON 정제 강화 (3주차 개선)
             raw = self._extract_json(raw)
@@ -73,12 +83,29 @@ class MenuAIProcessor:
 
         return result
 
+    def _generate_summary_with_llm(self, prompt: str) -> str:
+        """
+        리뷰 요약 생성을 담당하는 LLM 호출부입니다.
+
+        현재는 OpenAI 테스트 모델을 사용합니다.
+        향후 HuggingFace/로컬 LLM으로 전환할 때는 이 메서드 내부만 교체하면
+        analyze_reviews의 프롬프트 구성과 JSON 파싱 로직을 유지할 수 있습니다.
+        """
+        response = self.client.chat.completions.create(
+            model=self.llm_model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2  # 일관성 ↑
+        )
+
+        return response.choices[0].message.content.strip()
+
     def match_photo(self, menu_name, image_urls) -> str:
         """
         [VLM 기반 확장 구조 - 4주차]
 
         - 현재: 텍스트 기반 유사도 매칭 (CLIP 대체 구조)
         - 향후: 실제 VLM으로 교체 가능
+        - TODO(5월): 실제 이미지 임베딩 모델 적용 전후로 Top-1 정확도 비교
         """
 
         if not image_urls:
@@ -102,6 +129,60 @@ class MenuAIProcessor:
 
         return best_url
 
+    def evaluate_photo_matching(self, test_cases):
+        """
+        VLM 이미지-텍스트 매칭 정확도 검증용 함수입니다.
+
+        test_cases 예:
+        [
+            {
+                "menu_name": "김치찌개",
+                "image_urls": ["url1", "url2"],
+                "expected_url": "url1"
+            }
+        ]
+
+        현재 match_photo는 mock 구현이므로, 추후 실제 VLM 적용 전후 성능을
+        같은 테스트셋으로 비교하기 위한 기준점으로 사용합니다.
+        """
+        if not test_cases:
+            return {
+                "total": 0,
+                "correct": 0,
+                "accuracy": 0.0,
+                "results": []
+            }
+
+        results = []
+        correct = 0
+
+        for case in test_cases:
+            predicted_url = self.match_photo(
+                case.get("menu_name", ""),
+                case.get("image_urls", [])
+            )
+            expected_url = case.get("expected_url")
+            is_correct = predicted_url == expected_url
+
+            if is_correct:
+                correct += 1
+
+            results.append({
+                "menu_name": case.get("menu_name", ""),
+                "predicted_url": predicted_url,
+                "expected_url": expected_url,
+                "is_correct": is_correct
+            })
+
+        total = len(test_cases)
+
+        return {
+            "total": total,
+            "correct": correct,
+            "accuracy": correct / total,
+            "results": results
+        }
+
     def vectorize_text(self, text_list):
         """
         [벡터화 + 검색 확장]
@@ -117,11 +198,12 @@ class MenuAIProcessor:
     # 추가 기능 (3~4주차 구현)
     # -------------------------
 
-    def search_similar(self, query, text_list):
+    def search_similar(self, query, text_list, top_k=5):
         """
         [유사도 기반 검색 기능 - 4주차]
 
         - 키워드 기반 추천 기능
+        - top_k로 상위 결과 개수를 제한해 API 응답 크기와 UI 노출 개수를 조절
         """
 
         query_vec = self.vector_model.encode([query])[0]
@@ -131,12 +213,15 @@ class MenuAIProcessor:
 
         for i, vec in enumerate(text_vecs):
             score = self._cosine_similarity(query_vec, vec)
-            scores.append((text_list[i], score))
+            scores.append({
+                "text": text_list[i],
+                "score": float(score)
+            })
 
         # 유사도 기준 정렬
-        scores.sort(key=lambda x: x[1], reverse=True)
+        scores.sort(key=lambda x: x["score"], reverse=True)
 
-        return scores
+        return scores[:top_k]
 
     # -------------------------
     # 내부 유틸
