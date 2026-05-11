@@ -1,5 +1,6 @@
 import flet as ft
 import requests
+import os
 
 def main(page: ft.Page):
     # 아이폰 사이즈
@@ -16,6 +17,24 @@ def main(page: ft.Page):
     selected_keywords = set()
     keyword_options = ["달콤한", "매콤한", "새콤한", "바삭한", "부드러운", "구수한"]
     api_base_url = "http://127.0.0.1:8000"
+    google_maps_api_key = os.getenv("GOOGLE_MAPS_API_KEY", "")
+
+    def get_google_map_url(lat, lng):
+        if google_maps_api_key:
+            return (
+                "https://www.google.com/maps/embed/v1/view"
+                f"?key={google_maps_api_key}&center={lat},{lng}&zoom=16&maptype=roadmap"
+            )
+        return f"https://maps.google.com/maps?q={lat},{lng}&z=16&output=embed"
+
+    def get_google_static_map_url(lat, lng):
+        if not google_maps_api_key:
+            return ""
+        return (
+            "https://maps.googleapis.com/maps/api/staticmap"
+            f"?center={lat},{lng}&zoom=16&size=800x500&maptype=roadmap"
+            f"&markers=color:red%7C{lat},{lng}&key={google_maps_api_key}"
+        )
 
     # --- API 통신 함수 ---
     def fetch_search_results(lat, lng, radius, query, mode, keywords):
@@ -53,35 +72,165 @@ def main(page: ft.Page):
 
     def fetch_menu_details(menu_id):
         # 기능 2. 메뉴 상세 정보 API 호출
-        return [{"info_id": 101, "content": "고기가 정말 두툼해요", "info_type": "PROS", "upvotes": 5}]
+        try:
+            response = requests.get(
+                f"{api_base_url}/api/menu/{menu_id}/details",
+                timeout=3,
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            if isinstance(data, list):
+                return data
+            if isinstance(data, dict):
+                details = data.get("details", [])
+                if isinstance(details, list):
+                    return details
+        except Exception:
+            pass
+
+        return []
 
     # --- UI 이벤트 핸들러 ---
     def on_menu_click(e):
         # 메뉴 터치 시 상세 모달 오픈 로직
-        menu_id = e.control.data  # 저장된 menu_id 가져오기
+        menu_id = e.control.data
         details = fetch_menu_details(menu_id)
 
-        # 공통 상세 모달(BottomSheet) 구성
-        detail_view = ft.Column([
-            ft.Text("상세 코어 리뷰", size=20, weight="bold"),
-            *[ft.ListTile(
-                leading=ft.Icon(ft.icons.RECOMMEND if d['info_type'] == 'PROS' else ft.icons.DO_NOT_DISTURB),
-                title=ft.Text(d['content']),
-                trailing=ft.TextButton(f"👍 {d['upvotes']}", on_click=lambda _: on_vote_click(d['info_id'], True))
-            ) for d in details]
-        ], tight=True, padding=20)
-        
-        page.show_bottom_sheet(ft.BottomSheet(ft.Container(detail_view, bgcolor="white", border_radius=ft.border_radius.only(top_left=20, top_right=20))))
+        if not details:
+            details = [
+                {
+                    "info_id": 101,
+                    "content": "고기가 정말 두툼하고 식감이 좋아요.",
+                    "info_type": "PROS",
+                    "upvotes": 5,
+                    "downvotes": 1,
+                },
+                {
+                    "info_id": 102,
+                    "content": "소스가 조금 달다는 의견이 있어요.",
+                    "info_type": "CONS",
+                    "upvotes": 2,
+                    "downvotes": 0,
+                },
+            ]
 
-    def on_vote_click(info_id, is_up):
-        # 추천 버튼 클릭 시 서버 전송 및 UI 갱신
-        page.snack_bar = ft.SnackBar(ft.Text("투표가 반영되었습니다!"))
+        review_tiles = []
+
+        for d in details:
+            is_pro = d.get("info_type") == "PROS"
+
+            upvote_text = ft.Text(f"👍 {d.get('upvotes', 0)}", size=12)
+            downvote_text = ft.Text(f"👎 {d.get('downvotes', 0)}", size=12)
+
+            review_tiles.append(
+                ft.Container(
+                    padding=12,
+                    border_radius=12,
+                    bgcolor="#F0F5FF" if is_pro else "#FFF0F0",
+                    content=ft.Column(
+                        [
+                            ft.Row(
+                                [
+                                    ft.Text(
+                                        "장점 리뷰" if is_pro else "단점 리뷰",
+                                        weight="bold",
+                                        color="blue" if is_pro else "red",
+                                    ),
+                                ]
+                            ),
+                            ft.Text(d.get("content", ""), size=14),
+                            ft.Row(
+                                [
+                                    ft.TextButton(
+                                        content=upvote_text,
+                                        on_click=lambda e, info_id=d["info_id"], up=upvote_text, down=downvote_text:
+                                            on_vote_click(info_id, True, up, down)
+                                    ),
+                                    ft.TextButton(
+                                        content=downvote_text,
+                                        on_click=lambda e, info_id=d["info_id"], up=upvote_text, down=downvote_text:
+                                            on_vote_click(info_id, False, up, down)
+                                    ),
+                                ],
+                                spacing=8,
+                            ),
+                        ],
+                        spacing=6,
+                    ),
+                )
+            )
+
+        detail_view = ft.Column(
+            [
+                ft.Text("상세 코어 리뷰", size=20, weight="bold"),
+                ft.Text("리뷰가 도움이 되었는지 추천/비추천을 선택할 수 있습니다.", size=12, color="#6B7280"),
+                *review_tiles,
+            ],
+            tight=True,
+            spacing=10,
+        )
+
+        page.show_bottom_sheet(
+            ft.BottomSheet(
+                ft.Container(
+                    detail_view,
+                    bgcolor="white",
+                    padding=20,
+                    border_radius=ft.border_radius.only(top_left=20, top_right=20),
+                )
+            )
+        )
+
+    def on_vote_click(info_id, is_up, upvote_text=None, downvote_text=None):
+        # 추천/비추천 버튼 클릭 시 서버 전송 및 UI 갱신
+        payload = {
+            "info_id": info_id,
+            "is_up": is_up,
+        }
+
+        snack_message = "추천이 반영되었습니다!" if is_up else "비추천이 반영되었습니다!"
+
+        try:
+            response = requests.post(
+                f"{api_base_url}/api/vote",
+                json=payload,
+                timeout=3,
+            )
+            response.raise_for_status()
+
+            # 서버 응답에 최신 추천/비추천 수가 있으면 반영
+            data = response.json() if response.content else {}
+
+            if upvote_text and "upvotes" in data:
+                upvote_text.value = f"👍 {data['upvotes']}"
+
+            if downvote_text and "downvotes" in data:
+                downvote_text.value = f"👎 {data['downvotes']}"
+
+        except Exception:
+            # 서버 연결 전에도 UI 확인 가능하도록 임시 로컬 증가
+            if is_up and upvote_text:
+                current = int(upvote_text.value.replace("👍", "").strip())
+                upvote_text.value = f"👍 {current + 1}"
+
+            if not is_up and downvote_text:
+                current = int(downvote_text.value.replace("👎", "").strip())
+                downvote_text.value = f"👎 {current + 1}"
+
+            snack_message = "서버 미연결 상태입니다. 임시로 UI에만 반영했습니다."
+
+        page.snack_bar = ft.SnackBar(ft.Text(snack_message))
         page.snack_bar.open = True
         page.update()
 
     def update_location_ui():
         location_text.value = f"현재 위치: {user_location['lat']:.4f}, {user_location['lng']:.4f}"
         map_center_text.value = f"지도 중심: {user_location['lat']:.4f}, {user_location['lng']:.4f}"
+        if map_webview:
+            map_webview.url = get_google_map_url(user_location["lat"], user_location["lng"])
+        if map_image:
+            map_image.src = get_google_static_map_url(user_location["lat"], user_location["lng"])
         page.update()
 
     def refresh_search_mode_ui():
@@ -279,38 +428,64 @@ def main(page: ft.Page):
             content=ft.Row([ft.Text(keyword, size=12, color="#4B5563")], tight=True),
         )
 
-    map_area = ft.Container(
-        height=280,
-        border_radius=16,
-        bgcolor="#DCEBFF",
-        padding=16,
-        content=ft.Stack(
-            controls=[
+    map_webview = None
+    map_image = None
+    map_controls = []
+    if hasattr(ft, "WebView"):
+        map_webview = ft.WebView(
+            url=get_google_map_url(user_location["lat"], user_location["lng"]),
+            expand=True,
+        )
+        map_controls.append(map_webview)
+    else:
+        if google_maps_api_key:
+            map_image = ft.Image(
+                src=get_google_static_map_url(user_location["lat"], user_location["lng"]),
+                fit=ft.ImageFit.COVER,
+                expand=True,
+            )
+            map_controls.append(map_image)
+        else:
+            map_controls.append(
                 ft.Container(
                     expand=True,
-                    border_radius=16,
                     bgcolor="#C8DEFF",
+                    alignment=ft.Alignment(0, 0),
                     content=ft.Column(
                         alignment=ft.MainAxisAlignment.CENTER,
                         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                         controls=[
-                            # 일부 Flet 버전에서 MAP 아이콘 상수가 없어 이모지로 대체
-                            ft.Text("🗺️", size=42),
-                            ft.Text("메인 지도 화면", size=18, weight="bold", color="#1E3A8A"),
-                            map_center_text,
+                            ft.Text("WebView 미지원 환경입니다.", color="#1E3A8A"),
+                            ft.Text("GOOGLE_MAPS_API_KEY 설정 시 Static Map으로 표시됩니다.", size=12, color="#1E3A8A"),
+                            ft.TextButton(
+                                "구글 지도 열기",
+                                on_click=lambda _: page.launch_url(
+                                    f"https://maps.google.com/?q={user_location['lat']},{user_location['lng']}"
+                                ),
+                            ),
                         ],
+                        spacing=4,
                     ),
-                ),
-                ft.Container(
-                    right=12,
-                    top=12,
-                    bgcolor="white",
-                    border_radius=20,
-                    padding=10,
-                    content=ft.Text("📍", size=18),
-                ),
-            ]
-        ),
+                )
+            )
+
+    map_controls.append(
+        ft.Container(
+            right=12,
+            top=12,
+            bgcolor="white",
+            border_radius=20,
+            padding=10,
+            content=ft.Text("📍", size=18),
+        )
+    )
+
+    map_area = ft.Container(
+        height=280,
+        border_radius=16,
+        clip_behavior=ft.ClipBehavior.HARD_EDGE,
+        bgcolor="#DCEBFF",
+        content=ft.Stack(controls=map_controls),
     )
 
     page.add(
