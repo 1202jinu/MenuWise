@@ -23,6 +23,7 @@ processor = MenuAIProcessor(api_key)
 # ------------------------------------------------------------------
 USE_DUMMY = True
 
+
 # [수정 3] 프론트 main.py가 core_pros, core_cons 필드를 기대하므로 더미에도 포함
 DUMMY_SEARCH_RESULTS = [
     {
@@ -265,4 +266,5 @@ async def vote(request: VoteRequest):
         return {"message": "투표가 반영되었습니다.", "info_id": request.info_id, "upvote": request.upvote}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"투표 처리 중 오류 발생: {str(e)}")
+        
         
