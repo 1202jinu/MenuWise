@@ -157,8 +157,17 @@ class MenuWiseDB:
             if len(cleaned_content) < 5:
                 continue
 
+            cursor.execute(
+                "SELECT review_id FROM reviews WHERE review_id = ?",
+                (review["review_id"],)
+            )
+            existing_review = cursor.fetchone()
+
+            if existing_review:
+                continue
+
             cursor.execute("""
-                INSERT OR REPLACE INTO reviews (
+                INSERT INTO reviews (
                     review_id,
                     res_id,
                     menu_id,
@@ -175,6 +184,24 @@ class MenuWiseDB:
             ))
 
         for info in core_infos:
+            cursor.execute("""
+                SELECT info_id FROM core_info
+                WHERE menu_id = ?
+                AND content = ?
+                AND info_type = ?
+                AND level = ?
+            """, (
+                info["menu_id"],
+                info["content"],
+                info["info_type"],
+                info["level"]
+            ))
+
+            existing_info = cursor.fetchone()
+
+            if existing_info:
+                continue
+
             cursor.execute("""
                 INSERT INTO core_info (menu_id, content, info_type, level, upvotes, downvotes)
                 VALUES (?, ?, ?, ?, ?, ?)
