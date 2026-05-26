@@ -37,7 +37,7 @@ def main():
     restaurant_list = crawler.crawl_restaurant_info("강원대")
 
     for res_data in restaurant_list:
-        reviews = crawler.crawl_reviews(res_data["restaurant"]["res_id"])
+        reviews = crawler.crawl_reviews_with_retry(res_data["restaurant"]["res_id"])
         res_data["reviews"] = reviews
         res_data["core_info"] = build_core_info()
 

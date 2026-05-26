@@ -1,6 +1,7 @@
 import sqlite3
 import math
 import re
+import time
 
 
 class MenuWiseDB:
@@ -71,6 +72,26 @@ class MenuWiseDB:
 
         return text
     
+    def validate_restaurant_data(self, restaurant):
+        """식당 데이터에 필수 값이 있는지 검증합니다."""
+        required_fields = ["res_id", "res_name"]
+
+        for field in required_fields:
+            if not restaurant.get(field):
+                return False
+
+        return True
+
+    def validate_review_data(self, review):
+        """리뷰 데이터에 필수 값이 있는지 검증합니다."""
+        required_fields = ["review_id", "content"]
+
+        for field in required_fields:
+            if not review.get(field):
+                return False
+
+        return True
+    
     def transform_ai_core_info(self, menu_id, ai_result):
         """AI 요약 JSON을 core_info 테이블 저장 형식으로 변환합니다."""
         transformed = []
@@ -116,6 +137,9 @@ class MenuWiseDB:
         cursor = self.conn.cursor()
 
         restaurant = res_data["restaurant"]
+        if not self.validate_restaurant_data(restaurant):
+            print("유효하지 않은 식당 데이터입니다. 저장을 건너뜁니다.")
+            return
         menus = res_data.get("menus", [])
         reviews = res_data.get("reviews", [])
         core_infos = res_data.get("core_info", [])
@@ -152,6 +176,9 @@ class MenuWiseDB:
             ))
 
         for review in reviews:
+            if not self.validate_review_data(review):
+                continue
+            
             cleaned_content = self.clean_review_text(review.get("content"))
 
             if len(cleaned_content) < 5:
@@ -459,6 +486,23 @@ class ReviewCrawler:
                 ]
             }
         ]
+    def crawl_reviews_with_retry(self, res_id, max_retries=3, delay=1):
+        """리뷰 크롤링 실패 시 일정 횟수 재시도합니다."""
+        for attempt in range(1, max_retries + 1):
+            try:
+                reviews = self.crawl_reviews(res_id)
+
+                if reviews:
+                    return reviews
+
+                print(f"리뷰 크롤링 결과 없음 - 재시도 {attempt}/{max_retries}")
+
+            except Exception as e:
+                print(f"리뷰 크롤링 실패 - 재시도 {attempt}/{max_retries}: {e}")
+
+            time.sleep(delay)
+
+        return []
 
     def crawl_reviews(self, res_id):
         """특정 식당의 리뷰 원문 데이터 전체를 수집하여 저장합니다.
