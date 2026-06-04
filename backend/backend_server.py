@@ -1,9 +1,8 @@
 # backend_server.py
 from fastapi import FastAPI, HTTPException
+from fastapi.concurrency import run_in_threadpool   # 피드백 1: match_photo 동기 병목 방지
 from pydantic import BaseModel
-from crawler.database_and_crawler import MenuWiseDB
-from ai_engine.ai_analyzer import MenuAIProcessor   # [수정 1] 실제 파일명으로 import 경로 수정
-from typing import Optional
+from typing import Optional, List
 import os
 
 app = FastAPI(
@@ -12,10 +11,19 @@ app = FastAPI(
     version="0.1.0"
 )
 
-# DB / AI 초기화
-db = MenuWiseDB("menu_wise.db")
-api_key = os.getenv("OPENAI_API_KEY", "")           # [수정 2] AI 파트가 OpenAI 사용하므로 키 이름 수정
-processor = MenuAIProcessor(api_key)
+# DB / AI 초기화 (타 파트 미완성 시 서버 실행 가능하도록 try/except 처리)
+try:
+    from crawler.database_and_crawler import MenuWiseDB
+    db = MenuWiseDB("menu_wise.db")
+except ModuleNotFoundError:
+    db = None
+
+try:
+    from ai_engine.ai_analyzer import MenuAIProcessor
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    processor = MenuAIProcessor(api_key)
+except ModuleNotFoundError:
+    processor = None
 
 # ------------------------------------------------------------------
 # 더미 데이터 (DB/AI 미완성 시 프론트 연동 테스트용)
@@ -23,8 +31,6 @@ processor = MenuAIProcessor(api_key)
 # ------------------------------------------------------------------
 USE_DUMMY = True
 
-
-# [수정 3] 프론트 main.py가 core_pros, core_cons 필드를 기대하므로 더미에도 포함
 DUMMY_SEARCH_RESULTS = [
     {
         "menu_id": "menu_001",
@@ -34,7 +40,9 @@ DUMMY_SEARCH_RESULTS = [
         "photo_url": "https://example.com/photo1.jpg",
         "core_pros": "진한 국물, 고기 푸짐",
         "core_cons": "간이 센 편",
-        "distance_km": 0.3
+        "distance_km": 0.3,
+        "lat": 37.8813,
+        "lng": 127.7298
     },
     {
         "menu_id": "menu_002",
@@ -44,7 +52,9 @@ DUMMY_SEARCH_RESULTS = [
         "photo_url": "https://example.com/photo2.jpg",
         "core_pros": "중독성 있는 매운맛",
         "core_cons": "매우 매움 주의",
-        "distance_km": 0.7
+        "distance_km": 0.7,
+        "lat": 37.8821,
+        "lng": 127.7310
     }
 ]
 
@@ -69,6 +79,7 @@ DUMMY_DETAILS = [
     }
 ]
 
+# 피드백 4: AI 응답을 level_1/level_2 최상위 구조로 통일 (summary 키 제거)
 DUMMY_SUMMARY = {
     "menu_id": "menu_001",
     "menu_name": "순대국밥",
@@ -76,7 +87,12 @@ DUMMY_SUMMARY = {
     "level_1": {
         "pros": "진한 국물, 푸짐한 고기, 가성비 좋음",
         "cons": "간이 센 편, 짤 수 있음"
-    }
+    },
+    "level_2": [
+        {"content": "국물이 진하고 깊은 맛이 나요", "type": "PROS"},
+        {"content": "고기 양이 많아서 배부르게 먹을 수 있어요", "type": "PROS"},
+        {"content": "간이 좀 센 편이에요", "type": "CONS"}
+    ]
 }
 
 
@@ -89,44 +105,32 @@ class VoteRequest(BaseModel):
 
 
 # ------------------------------------------------------------------
-# 헬퍼 함수: DB에 get_menu_details가 없으므로 백엔드에서 직접 쿼리  [수정 4]
+# 헬퍼 함수
 # ------------------------------------------------------------------
-def _fetch_core_info(menu_id: str):
-    """core_info 테이블에서 menu_id에 해당하는 리뷰 목록 조회"""
+
+def _fetch_photo_urls(menu_id: str) -> List[str]:
+    """
+    리뷰에 첨부된 사진 URL 목록 조회
+    AI match_photo 입력용 — reviews 테이블 기준
+    """
     cursor = db.conn.cursor()
     cursor.execute("""
-        SELECT info_id, menu_id, content, info_type, level, upvotes, downvotes
-        FROM core_info
+        SELECT photo_url
+        FROM reviews
         WHERE menu_id = ?
-        ORDER BY level ASC, upvotes DESC
+        AND photo_url IS NOT NULL
     """, (menu_id,))
     rows = cursor.fetchall()
-    return [
-        {
-            "info_id": row[0],
-            "menu_id": row[1],
-            "content": row[2],
-            "info_type": row[3],
-            "level": row[4],
-            "upvotes": row[5],
-            "downvotes": row[6]
-        }
-        for row in rows
-    ]
+    return [row[0] for row in rows if row[0]]
 
 
-def _fetch_menu_name(menu_id: str):
-    """메뉴 이름 조회 (AI 요약 호출 시 필요)"""
-    cursor = db.conn.cursor()
-    cursor.execute("SELECT menu_name FROM menus WHERE menu_id = ?", (menu_id,))
-    row = cursor.fetchone()
-    return row[0] if row else "알 수 없는 메뉴"
-
-
+# 피드백 4 추후: _build_search_results는 db.search_menus가
+# menus/restaurants JOIN까지 완성되면 완전 삭제 예정
+# 현재는 db.search_menus가 식당 목록만 반환하므로 임시 가공 함수 유지
 def _build_search_results(restaurants: list):
     """
-    get_nearby_restaurants 결과(식당 목록)에
-    프론트가 필요한 core_pros / core_cons 필드를 붙여서 반환  [수정 5]
+    get_nearby_restaurants 결과에 core_pros/core_cons/lat/lng 필드를 붙여서 반환
+    TODO: db.search_menus가 완성형 구조로 업그레이드되면 이 함수 삭제
     """
     result = []
     cursor = db.conn.cursor()
@@ -141,7 +145,6 @@ def _build_search_results(restaurants: list):
         for menu in menus:
             menu_id, menu_name, price, photo_url = menu
 
-            # level=1 (대표) pros/cons 조회
             cursor.execute("""
                 SELECT content, info_type FROM core_info
                 WHERE menu_id = ? AND level = 1
@@ -159,7 +162,9 @@ def _build_search_results(restaurants: list):
                 "photo_url": photo_url or "",
                 "core_pros": core_pros,
                 "core_cons": core_cons,
-                "distance_km": res["distance_km"]
+                "distance_km": res["distance_km"],
+                "lat": res.get("lat"),
+                "lng": res.get("lng")
             })
     return result
 
@@ -176,17 +181,18 @@ def _build_search_results(restaurants: list):
 async def search_menus(
     lat: float,
     lng: float,
-    radius: float,                      # [수정 6] DB 메서드 인자명과 통일 (radius_km → radius)
+    radius: float,
     query: Optional[str] = None
 ):
     if USE_DUMMY:
         return {"results": DUMMY_SEARCH_RESULTS}
 
     try:
-        # [수정 6] DB 메서드는 인자 3개 (lat, lng, radius)
+        # 피드백 4 추후: query 있을 때 db.search_menus 완성되면 아래로 교체:
+        # if query:
+        #     return {"results": db.search_menus(query, lat, lng, radius)}
         restaurants = db.get_nearby_restaurants(lat, lng, radius)
 
-        # query 키워드 필터링
         if query:
             query_lower = query.lower()
             results = [
@@ -211,14 +217,16 @@ async def search_menus(
 )
 async def get_details(menu_id: str):
     if USE_DUMMY:
-        return {"results": DUMMY_DETAILS}
+        return {"details": DUMMY_DETAILS}   # 피드백 2: 키 이름 results → details
 
     try:
-        # [수정 4] DB에 get_menu_details 없으므로 헬퍼 함수로 직접 쿼리
-        results = _fetch_core_info(menu_id)
-        if not results:
-            raise HTTPException(status_code=404, detail=f"menu_id '{menu_id}'에 해당하는 리뷰가 없습니다.")
-        return {"results": results}
+        # 피드백 3: _fetch_core_info 대신 db.get_menu_details 사용
+        menu_data = db.get_menu_details(menu_id)
+        if not menu_data:
+            raise HTTPException(status_code=404, detail=f"menu_id '{menu_id}'에 해당하는 메뉴가 없습니다.")
+        # get_menu_details는 중첩 딕셔너리 구조이므로 core_info 리스트만 추출
+        results = menu_data.get("core_info", [])
+        return {"details": results}         # 피드백 2 키 이름 results → details
     except HTTPException:
         raise
     except Exception as e:
@@ -227,24 +235,43 @@ async def get_details(menu_id: str):
 
 @app.get(
     "/api/menu/{menu_id}/summary",
-    summary="AI 메뉴 요약 조회",
-    description="menu_id에 해당하는 AI 요약 결과(장단점 요약)를 반환합니다."
+    summary="AI 메뉴 요약 + 대표 사진 조회",
+    description="menu_id에 해당하는 AI 요약 결과(장단점 요약)와 대표 사진 URL을 반환합니다."
 )
 async def get_menu_summary(menu_id: str):
     if USE_DUMMY:
         return DUMMY_SUMMARY
 
     try:
-        reviews = _fetch_core_info(menu_id)
-        if not reviews:
-            raise HTTPException(status_code=404, detail=f"menu_id '{menu_id}'에 해당하는 리뷰가 없습니다.")
+        # 피드백 3: db.get_menu_details 사용 + core_info 파싱
+        menu_data = db.get_menu_details(menu_id)
+        if not menu_data:
+            raise HTTPException(status_code=404, detail=f"menu_id '{menu_id}'에 해당하는 메뉴가 없습니다.")
 
-        menu_name = _fetch_menu_name(menu_id)
+        menu_name = menu_data["menu_name"]
+        # 피드백 3: get_menu_details의 중첩 구조에서 core_info 리스트만 추출
+        reviews = menu_data.get("core_info", [])
         review_texts = [r["content"] for r in reviews]
 
-        # [수정 7] AI 실제 메서드명 analyze_reviews(menu_name, reviews) 로 수정
-        summary = processor.analyze_reviews(menu_name, review_texts)
-        return {"menu_id": menu_id, "menu_name": menu_name, "summary": summary}
+        # analyze_reviews는 async이므로 await
+        summary = await processor.analyze_reviews(menu_name, review_texts)
+
+        # 피드백 1: match_photo는 동기 함수이므로 run_in_threadpool로 감싸서 블로킹 방지
+        image_urls = _fetch_photo_urls(menu_id)
+        best_photo = await run_in_threadpool(processor.match_photo, menu_name, image_urls)
+
+        # 피드백 3: AI 결과를 DB에 저장 (transform_ai_core_info 파이프라인)
+        if db:
+            db.transform_ai_core_info(menu_id, summary)
+
+        # 피드백 4: AI 응답을 level_1/level_2 최상위 구조로 통일 (summary 키 없앰)
+        return {
+            "menu_id": menu_id,
+            "menu_name": menu_name,
+            "photo_url": best_photo,
+            "level_1": summary.get("level_1", {}),
+            "level_2": summary.get("level_2", [])
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -261,10 +288,8 @@ async def vote(request: VoteRequest):
         return {"message": f"info_id {request.info_id} 투표 완료 (더미)", "upvote": request.upvote}
 
     try:
-        # [수정 8] DB 실제 메서드명 update_vote(info_id, is_upvote) 로 수정
-        db.update_vote(request.info_id, request.upvote)
+        # 피드백 1: DB 실제 메서드명 vote(info_id, is_upvote) 로 수정
+        db.vote(request.info_id, request.upvote)
         return {"message": "투표가 반영되었습니다.", "info_id": request.info_id, "upvote": request.upvote}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"투표 처리 중 오류 발생: {str(e)}")
-        
-        
