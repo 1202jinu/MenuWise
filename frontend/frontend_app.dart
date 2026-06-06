@@ -1292,6 +1292,8 @@ class MenuSummary {
     required this.menuId,
     required this.menuName,
     required this.price,
+    required this.latitude,
+    required this.longitude,
     required this.photoUrl,
     required this.corePros,
     required this.coreCons,
@@ -1300,6 +1302,8 @@ class MenuSummary {
   final String menuId;
   final String menuName;
   final int price;
+  final double latitude;
+  final double longitude;
   final String photoUrl;
   final String corePros;
   final String coreCons;
@@ -1319,7 +1323,9 @@ class MenuSummary {
     return MenuSummary(
       menuId: '${json['menu_id'] ?? ''}',
       menuName: '${json['menu_name'] ?? json['name'] ?? '이름 없는 메뉴'}',
-      price: _asInt(json['price']),
+      price: _asInt(json['price'] ?? 0),
+      latitude: _asDouble(json['lat'] ?? json['latitude'] ?? 0),
+      longitude: _asDouble(json['lng'] ?? json['longitude'] ?? 0),
       photoUrl: '${json['photo_url'] ?? ''}',
       corePros: '${json['core_pros'] ?? ''}',
       coreCons: '${json['core_cons'] ?? ''}',
@@ -1346,12 +1352,12 @@ class CoreInfo {
 
   factory CoreInfo.fromJson(Map<String, dynamic> json) {
     return CoreInfo(
-      infoId: _asInt(json['info_id']),
+      infoId: _asInt(json['info_id'] ?? 0),
       content: '${json['content'] ?? ''}',
       infoType: '${json['info_type'] ?? ''}',
-      level: _asInt(json['level']),
-      upvotes: _asInt(json['upvotes']),
-      downvotes: _asInt(json['downvotes']),
+      level: _asInt(json['level'] ?? 0),
+      upvotes: _asInt(json['upvotes'] ?? 0),
+      downvotes: _asInt(json['downvotes'] ?? 0),
     );
   }
 }
@@ -1382,6 +1388,16 @@ int _asInt(dynamic value) {
     return value.toInt();
   }
   return int.tryParse('$value') ?? 0;
+}
+
+double _asDouble(dynamic value) {
+  if (value is double) {
+    return value;
+  }
+  if (value is num) {
+    return value.toDouble();
+  }
+  return double.tryParse('$value') ?? 0;
 }
 
 bool get _usesAppleFont {
