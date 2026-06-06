@@ -29,3 +29,22 @@
   ```shell
   uv run fastapi dev
   ```
+
+## 사용 모델 및 라이선스
+
+| 모델 | 라이선스 | 비고 |
+|------|----------|------|
+| [snunlp/KR-SBERT-V40K-klueNLI-augSTS](https://huggingface.co/snunlp/KR-SBERT-V40K-klueNLI-augSTS) | 미명시 | Citation 표기 |
+| [google/siglip-base-patch16-256-multilingual](https://huggingface.co/google/siglip-base-patch16-256-multilingual) | Apache 2.0 | - |
+| GPT-4o-mini (OpenAI API) | Proprietary | OpenAI ToS 준수 |
+
+### Citation (KR-SBERT)
+
+@misc{kr-sbert,
+  author    = {Park, Suzi and Hyopil Shin},
+  title     = {KR-SBERT: A Pre-trained Korean-specific Sentence-BERT model},
+  year      = {2021},
+  publisher = {GitHub},
+  journal   = {GitHub repository},
+  howpublished = {\url{https://github.com/snunlp/KR-SBERT}}
+}
