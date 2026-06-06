@@ -112,7 +112,10 @@ def _fetch_photo_urls(menu_id: str) -> List[str]:
     """
     리뷰에 첨부된 사진 URL 목록 조회
     AI match_photo 입력용 — reviews 테이블 기준
+    [완성] db None 체크 추가
     """
+    if db is None:
+        return []
     cursor = db.conn.cursor()
     cursor.execute("""
         SELECT photo_url
@@ -124,13 +127,42 @@ def _fetch_photo_urls(menu_id: str) -> List[str]:
     return [row[0] for row in rows if row[0]]
 
 
-# 피드백 4 추후: _build_search_results는 db.search_menus가
-# menus/restaurants JOIN까지 완성되면 완전 삭제 예정
-# 현재는 db.search_menus가 식당 목록만 반환하므로 임시 가공 함수 유지
+def _save_ai_summary(menu_id: str, summary: dict):
+    """
+    AI 요약 결과를 core_info 테이블에 저장
+    [완성] transform_ai_core_info는 변환만 하므로 변환 후 INSERT까지 직접 수행
+    """
+    if db is None:
+        return
+    transformed = db.transform_ai_core_info(menu_id, summary)
+    cursor = db.conn.cursor()
+    for info in transformed:
+        # 동일 내용이 이미 있으면 중복 저장 방지
+        cursor.execute("""
+            SELECT info_id FROM core_info
+            WHERE menu_id = ? AND content = ? AND info_type = ? AND level = ?
+        """, (info["menu_id"], info["content"], info["info_type"], info["level"]))
+        if cursor.fetchone():
+            continue
+        cursor.execute("""
+            INSERT INTO core_info (menu_id, content, info_type, level, upvotes, downvotes)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            info["menu_id"],
+            info["content"],
+            info["info_type"],
+            info["level"],
+            info.get("upvotes", 0),
+            info.get("downvotes", 0)
+        ))
+    db.conn.commit()
+
+
+# TODO: db.search_menus가 menus/restaurants JOIN 완성형으로 업그레이드되면
+# _build_search_results 삭제 후 db.search_menus 결과를 바로 리턴하도록 단순화
 def _build_search_results(restaurants: list):
     """
     get_nearby_restaurants 결과에 core_pros/core_cons/lat/lng 필드를 붙여서 반환
-    TODO: db.search_menus가 완성형 구조로 업그레이드되면 이 함수 삭제
     """
     result = []
     cursor = db.conn.cursor()
@@ -187,24 +219,17 @@ async def search_menus(
     if USE_DUMMY:
         return {"results": DUMMY_SEARCH_RESULTS}
 
+    if db is None:
+        raise HTTPException(status_code=503, detail="DB가 초기화되지 않았습니다.")
+
     try:
-        # 피드백 4 추후: query 있을 때 db.search_menus 완성되면 아래로 교체:
-        # if query:
-        #     return {"results": db.search_menus(query, lat, lng, radius)}
-        restaurants = db.get_nearby_restaurants(lat, lng, radius)
-
+        # [완성] query 있을 때 db.search_menus 연결 (DB 파트에 구현 완료된 메서드)
         if query:
-            query_lower = query.lower()
-            results = [
-                r for r in _build_search_results(restaurants)
-                if query_lower in r["menu_name"].lower()
-                or query_lower in r["restaurant_name"].lower()
-                or query_lower in r["core_pros"].lower()
-                or query_lower in r["core_cons"].lower()
-            ]
+            restaurants = db.search_menus(query, lat, lng, radius)
         else:
-            results = _build_search_results(restaurants)
+            restaurants = db.get_nearby_restaurants(lat, lng, radius)
 
+        results = _build_search_results(restaurants)
         return {"results": results}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"검색 중 오류 발생: {str(e)}")
@@ -217,16 +242,17 @@ async def search_menus(
 )
 async def get_details(menu_id: str):
     if USE_DUMMY:
-        return {"details": DUMMY_DETAILS}   # 피드백 2: 키 이름 results → details
+        return {"details": DUMMY_DETAILS}
+
+    if db is None:
+        raise HTTPException(status_code=503, detail="DB가 초기화되지 않았습니다.")
 
     try:
-        # 피드백 3: _fetch_core_info 대신 db.get_menu_details 사용
         menu_data = db.get_menu_details(menu_id)
         if not menu_data:
             raise HTTPException(status_code=404, detail=f"menu_id '{menu_id}'에 해당하는 메뉴가 없습니다.")
-        # get_menu_details는 중첩 딕셔너리 구조이므로 core_info 리스트만 추출
         results = menu_data.get("core_info", [])
-        return {"details": results}         # 피드백 2 키 이름 results → details
+        return {"details": results}
     except HTTPException:
         raise
     except Exception as e:
@@ -242,29 +268,31 @@ async def get_menu_summary(menu_id: str):
     if USE_DUMMY:
         return DUMMY_SUMMARY
 
+    if db is None:
+        raise HTTPException(status_code=503, detail="DB가 초기화되지 않았습니다.")
+    if processor is None:
+        raise HTTPException(status_code=503, detail="AI 프로세서가 초기화되지 않았습니다.")
+
     try:
-        # 피드백 3: db.get_menu_details 사용 + core_info 파싱
         menu_data = db.get_menu_details(menu_id)
         if not menu_data:
             raise HTTPException(status_code=404, detail=f"menu_id '{menu_id}'에 해당하는 메뉴가 없습니다.")
 
         menu_name = menu_data["menu_name"]
-        # 피드백 3: get_menu_details의 중첩 구조에서 core_info 리스트만 추출
         reviews = menu_data.get("core_info", [])
         review_texts = [r["content"] for r in reviews]
 
-        # analyze_reviews는 async이므로 await
+        # analyze_reviews는 async
         summary = await processor.analyze_reviews(menu_name, review_texts)
 
-        # 피드백 1: match_photo는 동기 함수이므로 run_in_threadpool로 감싸서 블로킹 방지
+        # 피드백 1: match_photo는 동기 함수이므로 run_in_threadpool로 블로킹 방지
         image_urls = _fetch_photo_urls(menu_id)
         best_photo = await run_in_threadpool(processor.match_photo, menu_name, image_urls)
 
-        # 피드백 3: AI 결과를 DB에 저장 (transform_ai_core_info 파이프라인)
-        if db:
-            db.transform_ai_core_info(menu_id, summary)
+        # [완성] AI 결과 변환 후 DB 저장까지 수행
+        _save_ai_summary(menu_id, summary)
 
-        # 피드백 4: AI 응답을 level_1/level_2 최상위 구조로 통일 (summary 키 없앰)
+        # 피드백 4: level_1/level_2 최상위 구조로 통일
         return {
             "menu_id": menu_id,
             "menu_name": menu_name,
@@ -287,8 +315,10 @@ async def vote(request: VoteRequest):
     if USE_DUMMY:
         return {"message": f"info_id {request.info_id} 투표 완료 (더미)", "upvote": request.upvote}
 
+    if db is None:
+        raise HTTPException(status_code=503, detail="DB가 초기화되지 않았습니다.")
+
     try:
-        # 피드백 1: DB 실제 메서드명 vote(info_id, is_upvote) 로 수정
         db.vote(request.info_id, request.upvote)
         return {"message": "투표가 반영되었습니다.", "info_id": request.info_id, "upvote": request.upvote}
     except Exception as e:
