@@ -8,6 +8,7 @@ env_path = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(dotenv_path=env_path)
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware   # 추가
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from typing import Optional, List
@@ -16,6 +17,13 @@ app = FastAPI(
     title="MenuWise API",
     description="음식점 리뷰 기반 메뉴 추천 시스템 백엔드 API - /docs 에서 전체 명세 확인 가능",
     version="0.1.0"
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],      # 개발/테스트용
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # DB / AI 초기화 (타 파트 미완성 시 서버 실행 가능하도록 try/except 처리)
