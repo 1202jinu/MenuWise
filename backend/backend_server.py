@@ -355,7 +355,7 @@ async def vote(request: VoteRequest):
         )
 
         if affected is None:
-            raise HTTPException(햐
+            raise HTTPException(
                 status_code=404,
                 detail=f"info_id {request.info_id}를 찾을 수 없습니다."
             )
