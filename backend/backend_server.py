@@ -164,6 +164,9 @@ def _build_search_results(restaurants: list):
     """
     get_nearby_restaurants 결과에 core_pros/core_cons/lat/lng 필드를 붙여서 반환
     """
+    if db is None:
+        return []
+
     result = []
     cursor = db.conn.cursor()
     for res in restaurants:
@@ -230,7 +233,13 @@ async def search_menus(
             restaurants = db.get_nearby_restaurants(lat, lng, radius)
 
         results = _build_search_results(restaurants)
+
+        results.sort(
+            key=lambda x: x.get("distance_km", float("inf"))
+        )
+
         return {"results": results}
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"검색 중 오류 발생: {str(e)}")
 
@@ -287,7 +296,15 @@ async def get_menu_summary(menu_id: str):
 
         # 피드백 1: match_photo는 동기 함수이므로 run_in_threadpool로 블로킹 방지
         image_urls = _fetch_photo_urls(menu_id)
-        best_photo = await run_in_threadpool(processor.match_photo, menu_name, image_urls)
+
+        best_photo = ""
+
+        if image_urls:
+            best_photo = await run_in_threadpool(
+                processor.match_photo,
+                menu_name,
+                image_urls
+            )
 
         # [완성] AI 결과 변환 후 DB 저장까지 수행
         _save_ai_summary(menu_id, summary)
@@ -309,17 +326,44 @@ async def get_menu_summary(menu_id: str):
 @app.post(
     "/api/vote",
     summary="리뷰 추천/비추천",
-    description='info_id에 해당하는 리뷰에 추천(upvote=true) 또는 비추천(upvote=false)을 반영합니다. Body 예시: {"info_id": 1, "upvote": true}'
+    description='info_id에 해당하는 리뷰에 추천(upvote=true) 또는 비추천(upvote=false)을 반영합니다.'
 )
 async def vote(request: VoteRequest):
     if USE_DUMMY:
-        return {"message": f"info_id {request.info_id} 투표 완료 (더미)", "upvote": request.upvote}
+        return {
+            "message": f"info_id {request.info_id} 투표 완료 (더미)",
+            "upvote": request.upvote
+        }
 
     if db is None:
-        raise HTTPException(status_code=503, detail="DB가 초기화되지 않았습니다.")
+        raise HTTPException(
+            status_code=503,
+            detail="DB가 초기화되지 않았습니다."
+        )
 
     try:
-        db.vote(request.info_id, request.upvote)
-        return {"message": "투표가 반영되었습니다.", "info_id": request.info_id, "upvote": request.upvote}
+        affected = db.vote(
+        request.info_id,
+        request.upvote
+        )
+
+        if affected is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"info_id {request.info_id}를 찾을 수 없습니다."
+            )
+
+        return {
+            "message": "투표가 반영되었습니다.",
+            "info_id": request.info_id,
+            "upvote": request.upvote
+        }
+
+    except HTTPException:
+        raise
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"투표 처리 중 오류 발생: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"투표 처리 중 오류 발생: {str(e)}"
+        )
