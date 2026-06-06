@@ -1250,7 +1250,7 @@ class ApiClient {
   Future<List<CoreInfo>> fetchMenuDetails(String menuId) async {
     final uri = Uri.parse('$baseUrl/api/menu/$menuId/details');
     final json = await _getJson(uri);
-    final rawDetails = json is Map<String, dynamic> ? json['details'] : json;
+    final rawDetails = json is Map<String, dynamic> ? json['results'] : json;
     if (rawDetails is! List) {
       return <CoreInfo>[];
     }
@@ -1258,15 +1258,20 @@ class ApiClient {
   }
 
   Future<void> vote({required int infoId, required bool isUpvote}) async {
-    final uri = Uri.parse('$baseUrl/api/vote').replace(
-      queryParameters: <String, String>{
-        'info_id': infoId.toString(),
-        'upvote': isUpvote.toString(),
+    final uri = Uri.parse('$baseUrl/api/vote');
+    final response = await http.post(
+      uri,
+      headers: const <String, String>{
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
       },
-    );
-    final response = await http.post(uri).timeout(const Duration(seconds: 4));
+      body: jsonEncode(<String, dynamic>{
+        'info_id': infoId,
+        'upvote': isUpvote,
+      }),
+    ).timeout(const Duration(seconds: 4));
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw Exception('Vote request failed');
+      throw Exception('Vote request failed: ${response.statusCode} ${response.body}');
     }
   }
 
