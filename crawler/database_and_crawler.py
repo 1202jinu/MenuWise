@@ -320,19 +320,18 @@ class MenuWiseDB:
                     continue
 
             results.append({
-                "menu_id": menu_id,
-                "restaurant_name": res_name,
-                "menu_name": menu_name,
-                "price": price,
+                "menu_id": menu_id or "",
+                "restaurant_name": res_name or "",
+                "menu_name": menu_name or "",
+                "price": price or 0,
                 "photo_url": photo_url or "",
-                "core_pros": core_pros,
-                "core_cons": core_cons,
+                "core_pros": core_pros or "",
+                "core_cons": core_cons or "",
                 "distance_km": round(distance_km, 2),
-                "lat": res_lat,
-                "lng": res_lng,
-                "category": category
+                "lat": res_lat or 0.0,
+                "lng": res_lng or 0.0,
+                "category": category or ""
             })
-
         results.sort(key=lambda x: x["distance_km"])
         return results
     
@@ -405,20 +404,20 @@ class MenuWiseDB:
             })
 
         return {
-            "menu_id": menu_row[0],
-            "menu_name": menu_row[1],
-            "price": menu_row[2],
+            "menu_id": menu_row[0] or "",
+            "menu_name": menu_row[1] or "",
+            "price": menu_row[2] or 0,
             "photo_url": menu_row[3] or "",
             "restaurant": {
-                "res_id": menu_row[4],
-                "res_name": menu_row[5],
-                "category": menu_row[6],
-                "lat": menu_row[7],
-                "lng": menu_row[8]
+                "res_id": menu_row[4] or "",
+                "res_name": menu_row[5] or "",
+                "category": menu_row[6] or "",
+                "lat": menu_row[7] or 0.0,
+                "lng": menu_row[8] or 0.0
             },
             "details": details,
             "core_info": details
-        }    
+        }
     def get_restaurants_by_category(self, category):
         """카테고리 기준으로 식당을 조회합니다."""
         cursor = self.conn.cursor()
