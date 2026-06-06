@@ -1250,7 +1250,7 @@ class ApiClient {
   Future<List<CoreInfo>> fetchMenuDetails(String menuId) async {
     final uri = Uri.parse('$baseUrl/api/menu/$menuId/details');
     final json = await _getJson(uri);
-    final rawDetails = json is Map<String, dynamic> ? json['results'] : json;
+    final rawDetails = json is Map<String, dynamic> ? json['details'] : json;
     if (rawDetails is! List) {
       return <CoreInfo>[];
     }
@@ -1266,7 +1266,7 @@ class ApiClient {
         'Content-Type': 'application/json',
       },
       body: jsonEncode(<String, dynamic>{
-        'info_id': infoId,
+        'info_id': infoId.toInt(),
         'upvote': isUpvote,
       }),
     ).timeout(const Duration(seconds: 4));
