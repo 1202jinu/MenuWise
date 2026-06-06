@@ -265,56 +265,117 @@ class MenuWiseDB:
         nearby.sort(key=lambda x: x["distance_km"])
         return nearby
     
-    def search_menus(self, keyword, lat, lng, radius_km):
-        """백엔드 검색 API용 함수: 키워드와 위치 기준으로 식당을 검색합니다."""
+    def search_menus(self, keyword="", lat=None, lng=None, radius_km=3, keywords=None):
+        """백엔드 검색 API용 함수: 키워드, 위치, 반경 기준으로 메뉴 검색 결과를 반환합니다."""
         cursor = self.conn.cursor()
 
+        keyword = keyword or ""
         search_keyword = f"%{keyword}%"
 
         cursor.execute("""
-            SELECT res_id, res_name, lat, lng, category
-            FROM restaurants
-            WHERE res_name LIKE ? OR category LIKE ?
-        """, (search_keyword, search_keyword))
+            SELECT
+                r.res_id,
+                r.res_name,
+                r.lat,
+                r.lng,
+                r.category,
+                m.menu_id,
+                m.menu_name,
+                m.price,
+                m.photo_url
+            FROM restaurants r
+            JOIN menus m ON r.res_id = m.res_id
+            WHERE
+                r.res_name LIKE ?
+                OR r.category LIKE ?
+                OR m.menu_name LIKE ?
+        """, (search_keyword, search_keyword, search_keyword))
 
         rows = cursor.fetchall()
+        results = []
 
-        result = []
         for row in rows:
-            res_id, res_name, res_lat, res_lng, category = row
-            dist = self._calculate_distance(lat, lng, res_lat, res_lng)
+            res_id, res_name, res_lat, res_lng, category, menu_id, menu_name, price, photo_url = row
 
-            if dist <= radius_km:
-                result.append({
-                    "res_id": res_id,
-                    "res_name": res_name,
-                    "category": category,
-                    "distance_km": round(dist, 2)
-                })
+            distance_km = 0
+            if lat is not None and lng is not None:
+                distance_km = self._calculate_distance(lat, lng, res_lat, res_lng)
 
-        result.sort(key=lambda x: x["distance_km"])
-        return result
+                if distance_km > radius_km:
+                    continue
 
+            cursor.execute("""
+                SELECT content, info_type
+                FROM core_info
+                WHERE menu_id = ? AND level = 1
+            """, (menu_id,))
+            core_rows = cursor.fetchall()
+
+            core_pros = next((item[0] for item in core_rows if item[1] == "PROS"), "")
+            core_cons = next((item[0] for item in core_rows if item[1] == "CONS"), "")
+
+            if keywords:
+                searchable_text = f"{menu_name} {res_name} {category} {core_pros} {core_cons}".lower()
+                if not any(str(k).lower() in searchable_text for k in keywords):
+                    continue
+
+            results.append({
+                "menu_id": menu_id,
+                "restaurant_name": res_name,
+                "menu_name": menu_name,
+                "price": price,
+                "photo_url": photo_url or "",
+                "core_pros": core_pros,
+                "core_cons": core_cons,
+                "distance_km": round(distance_km, 2),
+                "lat": res_lat,
+                "lng": res_lng,
+                "category": category
+            })
+
+        results.sort(key=lambda x: x["distance_km"])
+        return results
+    
     def vote(self, info_id, is_upvote):
-        """백엔드 피드백 API용 함수명."""
+        """백엔드 피드백 API용 함수: 추천/비추천 반영 후 최신 수치를 반환합니다."""
         self.update_feedback(info_id, is_upvote)
+
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT info_id, upvotes, downvotes
+            FROM core_info
+            WHERE info_id = ?
+        """, (info_id,))
+
+        row = cursor.fetchone()
+
+        if row is None:
+            return None
+
+        return {
+            "info_id": row[0],
+            "upvotes": row[1],
+            "downvotes": row[2]
+        }
         
     def get_menu_details(self, menu_id):
-        """메뉴 상세 정보와 핵심 요약 정보를 조회합니다."""
+        """메뉴 상세 정보와 core_info 목록을 백엔드 응답 구조에 맞게 반환합니다."""
         cursor = self.conn.cursor()
 
         cursor.execute("""
             SELECT
-                menus.menu_id,
-                menus.menu_name,
-                menus.price,
-                menus.photo_url,
-                restaurants.res_id,
-                restaurants.res_name,
-                restaurants.category
-            FROM menus
-            JOIN restaurants ON menus.res_id = restaurants.res_id
-            WHERE menus.menu_id = ?
+                m.menu_id,
+                m.menu_name,
+                m.price,
+                m.photo_url,
+                r.res_id,
+                r.res_name,
+                r.category,
+                r.lat,
+                r.lng
+            FROM menus m
+            JOIN restaurants r ON m.res_id = r.res_id
+            WHERE m.menu_id = ?
         """, (menu_id,))
 
         menu_row = cursor.fetchone()
@@ -323,38 +384,41 @@ class MenuWiseDB:
             return None
 
         cursor.execute("""
-            SELECT info_id, content, info_type, level, upvotes, downvotes
+            SELECT info_id, menu_id, content, info_type, level, upvotes, downvotes
             FROM core_info
             WHERE menu_id = ?
-            ORDER BY level ASC, info_id ASC
+            ORDER BY level ASC, upvotes DESC, info_id ASC
         """, (menu_id,))
 
         core_rows = cursor.fetchall()
 
-        core_info = []
+        details = []
         for row in core_rows:
-            core_info.append({
+            details.append({
                 "info_id": row[0],
-                "content": row[1],
-                "info_type": row[2],
-                "level": row[3],
-                "upvotes": row[4],
-                "downvotes": row[5]
+                "menu_id": row[1],
+                "content": row[2],
+                "info_type": row[3],
+                "level": row[4],
+                "upvotes": row[5],
+                "downvotes": row[6]
             })
 
         return {
             "menu_id": menu_row[0],
             "menu_name": menu_row[1],
             "price": menu_row[2],
-            "photo_url": menu_row[3],
+            "photo_url": menu_row[3] or "",
             "restaurant": {
                 "res_id": menu_row[4],
                 "res_name": menu_row[5],
-                "category": menu_row[6]
+                "category": menu_row[6],
+                "lat": menu_row[7],
+                "lng": menu_row[8]
             },
-            "core_info": core_info
-        }
-    
+            "details": details,
+            "core_info": details
+        }    
     def get_restaurants_by_category(self, category):
         """카테고리 기준으로 식당을 조회합니다."""
         cursor = self.conn.cursor()
