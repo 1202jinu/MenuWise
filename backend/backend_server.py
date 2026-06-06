@@ -1,9 +1,16 @@
 # backend_server.py
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+# 프로젝트 루트(.env) 로드
+env_path = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(dotenv_path=env_path)
+
 from fastapi import FastAPI, HTTPException
-from fastapi.concurrency import run_in_threadpool   # 피드백 1: match_photo 동기 병목 방지
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from typing import Optional, List
-import os
 
 app = FastAPI(
     title="MenuWise API",
@@ -348,7 +355,7 @@ async def vote(request: VoteRequest):
         )
 
         if affected is None:
-            raise HTTPException(
+            raise HTTPException(햐
                 status_code=404,
                 detail=f"info_id {request.info_id}를 찾을 수 없습니다."
             )
