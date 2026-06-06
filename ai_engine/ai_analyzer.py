@@ -26,7 +26,7 @@ class MenuAIProcessor:
         load_dotenv(dotenv_path=Path(__file__).with_name(".env"))
         load_dotenv()
 
-        if api_key is None:
+        if not api_key:
             api_key = os.getenv("OPENAI_API_KEY")
 
         self.api_key = api_key
@@ -63,11 +63,13 @@ class MenuAIProcessor:
         return reviews
 
     def _build_review_prompt(self, menu_name, reviews) -> str:
+        review_text = "\n".join(self._normalize_review_texts(reviews))
+
         return f"""
 당신은 음식점 리뷰 분석 전문가입니다.
 
 메뉴 '{menu_name}'에 대한 리뷰:
-{reviews}
+{review_text}
 
 아래 규칙을 반드시 지켜 JSON으로만 응답하세요.
 
@@ -89,6 +91,30 @@ class MenuAIProcessor:
 }}
 """
 
+    def _normalize_review_texts(self, reviews):
+        """문자열 리스트와 crawler 리뷰 dict 리스트를 모두 프롬프트용 텍스트로 정리한다."""
+        if reviews is None:
+            return []
+
+        if isinstance(reviews, str):
+            return [reviews]
+
+        if not isinstance(reviews, list):
+            return [str(reviews)]
+
+        normalized = []
+        for review in reviews:
+            if isinstance(review, dict):
+                content = review.get("content", "")
+            else:
+                content = review
+
+            content = str(content).strip()
+            if content:
+                normalized.append(content)
+
+        return normalized
+
     async def _generate_summary_with_llm(self, prompt: str) -> str:
         self._ensure_openai_client()
 
@@ -102,6 +128,9 @@ class MenuAIProcessor:
 
     def _ensure_openai_client(self):
         """LLM 요약이 필요할 때만 OpenAI 클라이언트를 생성한다."""
+        if not self.api_key:
+            raise ValueError("OPENAI_API_KEY is not set.")
+
         if self.client is None:
             self.client = openai.AsyncOpenAI(api_key=self.api_key)
 
@@ -232,6 +261,9 @@ class MenuAIProcessor:
 
     def search_similar(self, query, text_list, top_k=5):
         """텍스트 유사도 기반 검색."""
+        if not query or not text_list or top_k <= 0:
+            return []
+
         self._ensure_vector_model()
         query_vec = self.vector_model.encode([query])[0]
         text_vecs = self.vector_model.encode(text_list)
@@ -240,10 +272,12 @@ class MenuAIProcessor:
 
         for i, vec in enumerate(text_vecs):
             score = self._cosine_similarity(query_vec, vec)
-            scores.append({
+            scores.append(
+                {
                     "text": text_list[i],
                     "score": float(score),
-                })
+                }
+            )
 
         scores.sort(key=lambda x: x["score"], reverse=True)
 
@@ -289,5 +323,9 @@ class MenuAIProcessor:
         """코사인 유사도 계산."""
         vec1 = np.array(vec1)
         vec2 = np.array(vec2)
+        denominator = np.linalg.norm(vec1) * np.linalg.norm(vec2)
 
-        return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
+        if denominator == 0:
+            return 0.0
+
+        return np.dot(vec1, vec2) / denominator
