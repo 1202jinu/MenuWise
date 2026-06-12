@@ -44,5 +44,20 @@ frontend/.flutter-plugins-dependencies
 # ===== IDE / OS =====
 .vscode/
 .idea/
+*.iml
 .DS_Store
 Thumbs.db
+
+# ===== 추가 방어: 키 유출 예방 하드닝 =====
+# 로그/백업에 키가 찍힐 수 있어 무시
+*.log
+*.bak
+*.tmp
+# 크롤러 미리보기/후보 덤프는 photo URL 쿼리스트링에 Google API 키가 섞일 수 있어 패턴으로 차단
+# (ai_crawl_input*.txt 입력 데이터는 키가 없어 커밋 대상으로 유지됨)
+crawler/*_preview.txt
+crawler/*_candidates.txt
+# 일반 비밀 파일 패턴(파일명에 secret/credential 포함 시)
+*secret*.json
+*credential*.json
+*token*.json
