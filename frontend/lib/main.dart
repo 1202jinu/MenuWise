@@ -52,29 +52,36 @@ class _MenuWiseHomePageState extends State<MenuWiseHomePage> {
   final Set<String> _selectedKeywords = <String>{};
 
   static const List<TasteKeyword> _keywords = <TasteKeyword>[
-    TasteKeyword('sweet', '달콤함', '🍯'),
-    TasteKeyword('spicy', '매콤함', '🌶️'),
-    TasteKeyword('sour', '새콤함', '🍋'),
-    TasteKeyword('crispy', '바삭함', '✨'),
-    TasteKeyword('soft', '부드러움', '🥚'),
-    TasteKeyword('savory', '구수함', '🍜'),
+    TasteKeyword('sweet', '달콤', '🍯'),
+    TasteKeyword('spicy', '매콤', '🌶️'),
+    TasteKeyword('sour', '새콤', '🍋'),
+    TasteKeyword('crispy', '바삭', '✨'),
+    TasteKeyword('soft', '부드러', '🥚'),
+    TasteKeyword('savory', '구수', '🍜'),
+    TasteKeyword('value', '가성비', '💰'),
   ];
 
-  double _lat = 37.8813;
-  double _lng = 127.7298;
-  int _searchRadiusMeters = 500;
+  double _userLat = 37.8615;
+  double _userLng = 127.7355;
+  double _camLat = 37.8615;
+  double _camLng = 127.7355;
+  int _searchRadiusMeters = 1500;
+  SearchMode _searchMode = SearchMode.restaurant;
   bool _showSettings = false;
   bool _isLoading = false;
   bool _isLocating = false;
   bool _sheetOpen = false;
+  bool _sheetIsSearch = false;
+  String _sheetTitle = '근처 메뉴';
   String? _errorMessage;
   MenuSummary? _selectedMenu;
-  List<MenuSummary> _menus = <MenuSummary>[];
+  List<RestaurantPin> _restaurants = <RestaurantPin>[];
+  List<MenuSummary> _sheetMenus = <MenuSummary>[];
 
   @override
   void initState() {
     super.initState();
-    _loadCurrentLocationAndSearch();
+    _loadCurrentLocationThenRestaurants();
   }
 
   @override
@@ -83,68 +90,23 @@ class _MenuWiseHomePageState extends State<MenuWiseHomePage> {
     super.dispose();
   }
 
-  Future<void> _search() async {
-    setState(() {
-      _isLoading = true;
-      _errorMessage = null;
-    });
-
-    try {
-      final results = await _api.searchMenus(
-        lat: _lat,
-        lng: _lng,
-        radiusKm: _searchRadiusMeters / 1000,
-        query: _searchController.text.trim(),
-        mode: SearchMode.menu,
-        keywords: _selectedKeywords.toList()..sort(),
-      );
-
-      if (!mounted) {
-        return;
-      }
-
-      setState(() {
-        _menus = _filterLocally(results);
-        _sheetOpen = _menus.isNotEmpty;
-      });
-    } catch (_) {
-      if (!mounted) {
-        return;
-      }
-
-      setState(() {
-        _menus = <MenuSummary>[];
-        _sheetOpen = false;
-        _errorMessage = 'FastAPI 서버에 연결할 수 없습니다. ${_api.baseUrl} 상태를 확인해 주세요.';
-      });
-    } finally {
-      if (mounted) {
-        setState(() => _isLoading = false);
-      }
-    }
-  }
-
-  Future<void> _loadCurrentLocationAndSearch() async {
+  Future<void> _loadCurrentLocationThenRestaurants() async {
     setState(() => _isLocating = true);
-
     try {
       final position = await _getCurrentPosition();
-      if (!mounted) {
-        return;
-      }
+      if (!mounted) return;
       setState(() {
-        _lat = position.latitude;
-        _lng = position.longitude;
+        _userLat = position.latitude;
+        _userLng = position.longitude;
+        _camLat = position.latitude;
+        _camLng = position.longitude;
       });
     } catch (_) {
-      // Keep the Seoul fallback when location is unavailable or permission is denied.
+      // 위치 거부 시 강원대 기본 좌표 유지
     } finally {
-      if (mounted) {
-        setState(() => _isLocating = false);
-      }
+      if (mounted) setState(() => _isLocating = false);
     }
-
-    await _search();
+    await _loadRestaurants();
   }
 
   Future<Position> _getCurrentPosition() async {
@@ -152,57 +114,160 @@ class _MenuWiseHomePageState extends State<MenuWiseHomePage> {
     if (!serviceEnabled) {
       throw StateError('Location service is disabled');
     }
-
     var permission = await Geolocator.checkPermission();
     if (permission == LocationPermission.denied) {
       permission = await Geolocator.requestPermission();
     }
-
     if (permission == LocationPermission.denied || permission == LocationPermission.deniedForever) {
       throw StateError('Location permission is denied');
     }
-
     return Geolocator.getCurrentPosition(
       locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
     ).timeout(const Duration(seconds: 8));
   }
 
-  List<MenuSummary> _filterLocally(List<MenuSummary> source) {
-    Iterable<MenuSummary> filtered = source;
-    final query = _searchController.text.trim().toLowerCase();
-
-    if (query.isNotEmpty) {
-      filtered = filtered.where((menu) {
-        final text = '${menu.menuName} ${menu.corePros} ${menu.coreCons}'.toLowerCase();
-        return text.contains(query);
+  // 지도 핀(식당 목록) 로드. query가 있으면 식당명/카테고리로 거른다.
+  Future<void> _loadRestaurants({String query = ''}) async {
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+    try {
+      final restaurants = await _api.fetchRestaurants(
+        lat: _userLat,
+        lng: _userLng,
+        radiusKm: _searchRadiusMeters / 1000,
+        query: query,
+      );
+      if (!mounted) return;
+      setState(() {
+        _restaurants = restaurants;
+        if (query.isNotEmpty && restaurants.isNotEmpty) {
+          _camLat = restaurants.first.latitude;
+          _camLng = restaurants.first.longitude;
+        }
       });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _restaurants = <RestaurantPin>[];
+        _errorMessage = 'FastAPI 서버에 연결할 수 없습니다. ${_api.baseUrl} 상태를 확인해 주세요.';
+      });
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  // 검색 버튼/엔터: 모드별 동작
+  Future<void> _runSearch() async {
+    final query = _searchController.text.trim();
+
+    if (_searchMode == SearchMode.restaurant) {
+      setState(() => _sheetOpen = false);
+      await _loadRestaurants(query: query);
+      return;
     }
 
-    if (_selectedKeywords.isNotEmpty) {
-      filtered = filtered.where((menu) {
-        final text = '${menu.menuName} ${menu.corePros} ${menu.coreCons}'.toLowerCase();
-        return _selectedKeywords.any((keyword) => text.contains(keyword.toLowerCase()));
+    if (_searchMode == SearchMode.keyword && _selectedKeywords.isEmpty) {
+      setState(() {
+        _sheetMenus = <MenuSummary>[];
+        _sheetOpen = false;
+        _errorMessage = '상단 키워드를 한 개 이상 선택해 주세요.';
       });
+      return;
     }
 
-    return filtered.toList();
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+    try {
+      final results = await _api.searchMenus(
+        lat: _userLat,
+        lng: _userLng,
+        radiusKm: _searchRadiusMeters / 1000,
+        query: _searchMode == SearchMode.menu ? query : '',
+        mode: _searchMode,
+        keywords: _searchMode == SearchMode.keyword
+            ? (_selectedKeywords.toList()..sort())
+            : <String>[],
+      );
+      if (!mounted) return;
+      setState(() {
+        _sheetMenus = results;
+        _sheetIsSearch = true;
+        _sheetTitle = _searchMode == SearchMode.menu
+            ? (query.isEmpty ? '메뉴 검색' : "'$query' 비교")
+            : '키워드 검색 결과';
+        _sheetOpen = results.isNotEmpty;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _sheetMenus = <MenuSummary>[];
+        _sheetOpen = false;
+        _errorMessage = 'FastAPI 서버에 연결할 수 없습니다. ${_api.baseUrl} 상태를 확인해 주세요.';
+      });
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  void _setSearchMode(SearchMode mode) {
+    setState(() => _searchMode = mode);
   }
 
   void _toggleKeyword(TasteKeyword keyword) {
     setState(() {
+      _searchMode = SearchMode.keyword;
       if (!_selectedKeywords.add(keyword.label)) {
         _selectedKeywords.remove(keyword.label);
       }
     });
-    _search();
+    _runSearch();
   }
 
-  void _openSheet() {
-    if (_menus.isEmpty) {
-      _search();
-      return;
+  // 식당 핀 탭 → 그 식당의 메뉴를 시트에 표시하고 지도를 식당으로 이동
+  Future<void> _openRestaurant({
+    required String resId,
+    required String name,
+    required double lat,
+    required double lng,
+  }) async {
+    setState(() {
+      _camLat = lat;
+      _camLng = lng;
+      _isLoading = true;
+    });
+    try {
+      final menus = await _api.fetchRestaurantMenus(resId, lat: _userLat, lng: _userLng);
+      if (!mounted) return;
+      setState(() {
+        _sheetMenus = menus;
+        _sheetIsSearch = false;
+        _sheetTitle = name;
+        _sheetOpen = true;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _errorMessage = '식당 메뉴를 불러오지 못했습니다.');
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
     }
-    setState(() => _sheetOpen = true);
+  }
+
+  // 시트의 메뉴 탭: 검색결과면 식당으로 이동(#6), 식당메뉴면 상세로(#1)
+  void _onMenuTap(MenuSummary menu) {
+    if (_sheetIsSearch) {
+      _openRestaurant(
+        resId: menu.resId,
+        name: menu.restaurantName.isEmpty ? menu.menuName : menu.restaurantName,
+        lat: menu.latitude,
+        lng: menu.longitude,
+      );
+    } else {
+      setState(() => _selectedMenu = menu);
+    }
   }
 
   @override
@@ -218,10 +283,12 @@ class _MenuWiseHomePageState extends State<MenuWiseHomePage> {
                   searchRadiusMeters: _searchRadiusMeters,
                   showSettings: _showSettings,
                   isLoading: _isLoading,
-                  onSearch: _search,
+                  searchMode: _searchMode,
+                  onModeChange: _setSearchMode,
+                  onSearch: _runSearch,
                   onToggleSettings: () => setState(() => _showSettings = !_showSettings),
                   onRadiusChange: (radius) => setState(() => _searchRadiusMeters = radius),
-                  onRadiusChangeEnd: (_) => _search(),
+                  onRadiusChangeEnd: (_) => _loadRestaurants(),
                 ),
                 KeywordBanner(
                   keywords: _keywords,
@@ -230,15 +297,22 @@ class _MenuWiseHomePageState extends State<MenuWiseHomePage> {
                 ),
                 Expanded(
                   child: MapView(
-                    menus: _menus,
-                    latitude: _lat,
-                    longitude: _lng,
+                    restaurants: _restaurants,
+                    cameraLat: _camLat,
+                    cameraLng: _camLng,
+                    userLat: _userLat,
+                    userLng: _userLng,
                     radiusMeters: _searchRadiusMeters,
                     isLoading: _isLoading || _isLocating,
                     errorMessage: _errorMessage,
-                    onPinTap: _openSheet,
-                    onLocate: _loadCurrentLocationAndSearch,
-                    onRetry: _search,
+                    onRestaurantTap: (pin) => _openRestaurant(
+                      resId: pin.resId,
+                      name: pin.name,
+                      lat: pin.latitude,
+                      lng: pin.longitude,
+                    ),
+                    onLocate: _loadCurrentLocationThenRestaurants,
+                    onRetry: _loadRestaurants,
                   ),
                 ),
               ],
@@ -246,10 +320,11 @@ class _MenuWiseHomePageState extends State<MenuWiseHomePage> {
             if (_sheetOpen)
               PointerInterceptor(
                 child: RestaurantSheet(
-                  menus: _menus,
+                  title: _sheetTitle,
+                  menus: _sheetMenus,
                   radiusMeters: _searchRadiusMeters,
                   onClose: () => setState(() => _sheetOpen = false),
-                  onMenuSelect: (menu) => setState(() => _selectedMenu = menu),
+                  onMenuSelect: _onMenuTap,
                 ),
               ),
             if (_selectedMenu != null)
@@ -265,6 +340,55 @@ class _MenuWiseHomePageState extends State<MenuWiseHomePage> {
   }
 }
 
+class _SearchModeSelector extends StatelessWidget {
+  const _SearchModeSelector({required this.mode, required this.onChange});
+
+  final SearchMode mode;
+  final ValueChanged<SearchMode> onChange;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: AppColors.secondary,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      padding: const EdgeInsets.all(3),
+      child: Row(
+        children: SearchMode.values.map((m) {
+          final selected = m == mode;
+          return Expanded(
+            child: GestureDetector(
+              onTap: () => onChange(m),
+              child: Container(
+                height: 34,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: selected ? AppColors.background : Colors.transparent,
+                  borderRadius: BorderRadius.circular(6),
+                  boxShadow: selected
+                      ? const <BoxShadow>[
+                          BoxShadow(color: Color(0x14000000), blurRadius: 6, offset: Offset(0, 2)),
+                        ]
+                      : null,
+                ),
+                child: Text(
+                  m.label,
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: selected ? FontWeight.w800 : FontWeight.w500,
+                    color: selected ? AppColors.primary : AppColors.mutedForeground,
+                  ),
+                ),
+              ),
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+}
+
 class FigmaSearchBar extends StatelessWidget {
   const FigmaSearchBar({
     super.key,
@@ -272,6 +396,8 @@ class FigmaSearchBar extends StatelessWidget {
     required this.searchRadiusMeters,
     required this.showSettings,
     required this.isLoading,
+    required this.searchMode,
+    required this.onModeChange,
     required this.onSearch,
     required this.onToggleSettings,
     required this.onRadiusChange,
@@ -282,10 +408,23 @@ class FigmaSearchBar extends StatelessWidget {
   final int searchRadiusMeters;
   final bool showSettings;
   final bool isLoading;
+  final SearchMode searchMode;
+  final ValueChanged<SearchMode> onModeChange;
   final VoidCallback onSearch;
   final VoidCallback onToggleSettings;
   final ValueChanged<int> onRadiusChange;
   final ValueChanged<int> onRadiusChangeEnd;
+
+  String get _hint {
+    switch (searchMode) {
+      case SearchMode.restaurant:
+        return '음식점 이름 검색';
+      case SearchMode.menu:
+        return '메뉴 이름 검색 (예: 국수)';
+      case SearchMode.keyword:
+        return '상단 키워드를 선택하세요';
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -298,6 +437,8 @@ class FigmaSearchBar extends StatelessWidget {
         padding: const EdgeInsets.all(16),
         child: Column(
           children: <Widget>[
+            _SearchModeSelector(mode: searchMode, onChange: onModeChange),
+            const SizedBox(height: 12),
             Row(
               children: <Widget>[
                 Expanded(
@@ -310,10 +451,11 @@ class FigmaSearchBar extends StatelessWidget {
                     child: TextField(
                       controller: controller,
                       textInputAction: TextInputAction.search,
+                      enabled: searchMode != SearchMode.keyword,
                       onSubmitted: (_) => onSearch(),
-                      decoration: const InputDecoration(
-                        icon: Icon(Icons.search, color: AppColors.mutedForeground),
-                        hintText: '음식점 또는 메뉴 검색',
+                      decoration: InputDecoration(
+                        icon: const Icon(Icons.search, color: AppColors.mutedForeground),
+                        hintText: _hint,
                         border: InputBorder.none,
                       ),
                     ),
@@ -514,39 +656,42 @@ class KeywordChip extends StatelessWidget {
 class MapView extends StatelessWidget {
   const MapView({
     super.key,
-    required this.menus,
-    required this.latitude,
-    required this.longitude,
+    required this.restaurants,
+    required this.cameraLat,
+    required this.cameraLng,
+    required this.userLat,
+    required this.userLng,
     required this.radiusMeters,
     required this.isLoading,
     required this.errorMessage,
-    required this.onPinTap,
+    required this.onRestaurantTap,
     required this.onLocate,
     required this.onRetry,
   });
 
-  final List<MenuSummary> menus;
-  final double latitude;
-  final double longitude;
+  final List<RestaurantPin> restaurants;
+  final double cameraLat;
+  final double cameraLng;
+  final double userLat;
+  final double userLng;
   final int radiusMeters;
   final bool isLoading;
   final String? errorMessage;
-  final VoidCallback onPinTap;
+  final ValueChanged<RestaurantPin> onRestaurantTap;
   final VoidCallback onLocate;
   final VoidCallback onRetry;
 
   @override
   Widget build(BuildContext context) {
-    final mapMarkers = menus
-        .where((menu) => menu.latitude != 0 && menu.longitude != 0)
-        .take(20)
+    final mapMarkers = restaurants
+        .where((r) => r.latitude != 0 && r.longitude != 0)
         .map(
-          (menu) => MapMarker(
-            id: menu.menuId,
-            title: menu.menuName,
-            latitude: menu.latitude,
-            longitude: menu.longitude,
-            onTap: onPinTap,
+          (r) => MapMarker(
+            id: r.resId,
+            title: r.name,
+            latitude: r.latitude,
+            longitude: r.longitude,
+            onTap: () => onRestaurantTap(r),
           ),
         )
         .toList();
@@ -555,56 +700,64 @@ class MapView extends StatelessWidget {
       fit: StackFit.expand,
       children: <Widget>[
         OsmMapCanvas(
-          latitude: latitude,
-          longitude: longitude,
+          cameraLat: cameraLat,
+          cameraLng: cameraLng,
+          userLat: userLat,
+          userLng: userLng,
           radiusMeters: radiusMeters,
           markers: mapMarkers,
         ),
         if (isLoading)
           const Center(child: CircularProgressIndicator())
-        else if (menus.isEmpty)
+        else if (restaurants.isEmpty)
           Center(
-            child: MapNotice(
-              icon: errorMessage == null ? Icons.nearby_error_outlined : Icons.cloud_off_outlined,
-              title: errorMessage == null ? '검색 결과가 없습니다' : '서버 연결이 필요합니다',
-              message: errorMessage ?? '검색어와 키워드를 바꿔 다시 시도해 보세요.',
-              onRetry: onRetry,
+            child: PointerInterceptor(
+              child: MapNotice(
+                icon: errorMessage == null ? Icons.nearby_error_outlined : Icons.cloud_off_outlined,
+                title: errorMessage == null ? '근처에 식당이 없습니다' : '서버 연결이 필요합니다',
+                message: errorMessage ?? '검색 범위를 넓혀 다시 시도해 보세요.',
+                onRetry: onRetry,
+              ),
             ),
           ),
         Positioned(
           left: 16,
           bottom: 16,
-          child: Material(
-            color: AppColors.background,
-            borderRadius: BorderRadius.circular(8),
-            elevation: 6,
-            shadowColor: const Color(0x26000000),
-            child: IconButton(
-              tooltip: '현재 위치로 이동',
-              onPressed: isLoading ? null : onLocate,
-              icon: const Icon(Icons.my_location, color: AppColors.foreground),
+          child: PointerInterceptor(
+            child: Material(
+              color: AppColors.background,
+              borderRadius: BorderRadius.circular(8),
+              elevation: 6,
+              shadowColor: const Color(0x26000000),
+              child: IconButton(
+                tooltip: '현재 위치로 이동',
+                onPressed: isLoading ? null : onLocate,
+                icon: const Icon(Icons.my_location, color: AppColors.foreground),
+              ),
             ),
           ),
         ),
         Positioned(
           right: 16,
           bottom: 16,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            decoration: BoxDecoration(
-              color: AppColors.background,
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: AppColors.border),
-              boxShadow: const <BoxShadow>[
-                BoxShadow(color: Color(0x1A000000), blurRadius: 14, offset: Offset(0, 6)),
-              ],
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: <Widget>[
-                const Text('현재 위치 기준', style: TextStyle(fontSize: 12, color: AppColors.mutedForeground)),
-                Text('${_radiusLabel(radiusMeters)} 이내 ${menus.length}개'),
-              ],
+          child: PointerInterceptor(
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: AppColors.background,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: AppColors.border),
+                boxShadow: const <BoxShadow>[
+                  BoxShadow(color: Color(0x1A000000), blurRadius: 14, offset: Offset(0, 6)),
+                ],
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: <Widget>[
+                  const Text('현재 위치 기준', style: TextStyle(fontSize: 12, color: AppColors.mutedForeground)),
+                  Text('${_radiusLabel(radiusMeters)} 이내 식당 ${restaurants.length}곳'),
+                ],
+              ),
             ),
           ),
         ),
@@ -616,12 +769,14 @@ class MapView extends StatelessWidget {
 class RestaurantSheet extends StatelessWidget {
   const RestaurantSheet({
     super.key,
+    required this.title,
     required this.menus,
     required this.radiusMeters,
     required this.onClose,
     required this.onMenuSelect,
   });
 
+  final String title;
   final List<MenuSummary> menus;
   final int radiusMeters;
   final VoidCallback onClose;
@@ -651,9 +806,14 @@ class RestaurantSheet extends StatelessWidget {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: <Widget>[
-                        const Text('근처 추천 메뉴', style: TextStyle(fontSize: 19, fontWeight: FontWeight.w800)),
                         Text(
-                          '${_radiusLabel(radiusMeters)} · 메뉴 ${menus.length}개',
+                          title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w800),
+                        ),
+                        Text(
+                          '메뉴 ${menus.length}개',
                           style: const TextStyle(color: AppColors.mutedForeground),
                         ),
                       ],
@@ -724,6 +884,16 @@ class MenuListTile extends StatelessWidget {
                         Text(menu.priceLabel, style: const TextStyle(fontWeight: FontWeight.w700)),
                       ],
                     ),
+                    if (menu.restaurantName.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Text(
+                          menu.restaurantName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 12, color: AppColors.mutedForeground),
+                        ),
+                      ),
                     const SizedBox(height: 10),
                     ReviewLine(icon: Icons.thumb_up_alt_outlined, color: AppColors.primary, text: menu.corePros),
                     const SizedBox(height: 8),
@@ -765,20 +935,33 @@ class _MenuDetailPageState extends State<MenuDetailPage> {
     _details = widget.api.fetchMenuDetails(widget.menu.menuId);
   }
 
-  Future<void> _vote(CoreInfo info, bool isUpvote) async {
+  void _applyVoteCounts(CoreInfo info, String from, String to) {
+    if (from == 'up') {
+      info.upvotes -= 1;
+    } else if (from == 'down') {
+      info.downvotes -= 1;
+    }
+    if (to == 'up') {
+      info.upvotes += 1;
+    } else if (to == 'down') {
+      info.downvotes += 1;
+    }
+    info.userVote = to;
+  }
+
+  Future<void> _vote(CoreInfo info, String target) async {
+    final previous = info.userVote;
+    final next = previous == target ? 'none' : target; // 같은 버튼 두 번 → 취소
+
+    setState(() => _applyVoteCounts(info, previous, next)); // 낙관적 업데이트
+
     try {
-      await widget.api.vote(infoId: info.infoId, isUpvote: isUpvote);
-      setState(() {
-        if (isUpvote) {
-          info.upvotes += 1;
-        } else {
-          info.downvotes += 1;
-        }
-      });
+      await widget.api.vote(infoId: info.infoId, vote: next, previous: previous);
     } catch (_) {
       if (!mounted) {
         return;
       }
+      setState(() => _applyVoteCounts(info, next, previous)); // 실패 시 롤백
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('투표를 저장하지 못했습니다. 서버 상태를 확인해 주세요.')),
       );
@@ -862,8 +1045,8 @@ class _MenuDetailPageState extends State<MenuDetailPage> {
                     final info = details[index];
                     return ReviewCard(
                       info: info,
-                      onLike: () => _vote(info, true),
-                      onDislike: () => _vote(info, false),
+                      onLike: () => _vote(info, 'up'),
+                      onDislike: () => _vote(info, 'down'),
                     );
                   },
                   separatorBuilder: (context, index) => const SizedBox(height: 14),
@@ -905,9 +1088,21 @@ class ReviewCard extends StatelessWidget {
           const SizedBox(height: 14),
           Row(
             children: <Widget>[
-              CountButton(icon: Icons.thumb_up_alt_outlined, count: info.upvotes, onTap: onLike),
+              CountButton(
+                icon: info.userVote == 'up' ? Icons.thumb_up_alt : Icons.thumb_up_alt_outlined,
+                count: info.upvotes,
+                selected: info.userVote == 'up',
+                selectedColor: AppColors.primary,
+                onTap: onLike,
+              ),
               const SizedBox(width: 10),
-              CountButton(icon: Icons.thumb_down_alt_outlined, count: info.downvotes, onTap: onDislike),
+              CountButton(
+                icon: info.userVote == 'down' ? Icons.thumb_down_alt : Icons.thumb_down_alt_outlined,
+                count: info.downvotes,
+                selected: info.userVote == 'down',
+                selectedColor: AppColors.destructive,
+                onTap: onDislike,
+              ),
               const SizedBox(width: 10),
               CountButton(icon: Icons.mode_comment_outlined, count: 0, onTap: () {}),
             ],
@@ -919,16 +1114,26 @@ class ReviewCard extends StatelessWidget {
 }
 
 class CountButton extends StatelessWidget {
-  const CountButton({super.key, required this.icon, required this.count, required this.onTap});
+  const CountButton({
+    super.key,
+    required this.icon,
+    required this.count,
+    required this.onTap,
+    this.selected = false,
+    this.selectedColor = AppColors.primary,
+  });
 
   final IconData icon;
   final int count;
   final VoidCallback onTap;
+  final bool selected;
+  final Color selectedColor;
 
   @override
   Widget build(BuildContext context) {
+    final color = selected ? selectedColor : AppColors.foreground;
     return Material(
-      color: AppColors.background,
+      color: selected ? selectedColor.withValues(alpha: 0.12) : AppColors.background,
       borderRadius: BorderRadius.circular(999),
       child: InkWell(
         borderRadius: BorderRadius.circular(999),
@@ -938,9 +1143,15 @@ class CountButton extends StatelessWidget {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: <Widget>[
-              Icon(icon, size: 17),
+              Icon(icon, size: 17, color: color),
               const SizedBox(width: 6),
-              Text('$count'),
+              Text(
+                '$count',
+                style: TextStyle(
+                  color: color,
+                  fontWeight: selected ? FontWeight.w800 : FontWeight.w500,
+                ),
+              ),
             ],
           ),
         ),
@@ -1207,6 +1418,47 @@ class ApiClient {
     return rawResults.whereType<Map<String, dynamic>>().map(MenuSummary.fromJson).toList();
   }
 
+  Future<List<RestaurantPin>> fetchRestaurants({
+    required double lat,
+    required double lng,
+    required double radiusKm,
+    String query = '',
+  }) async {
+    final uri = Uri.parse('$baseUrl/api/restaurants').replace(
+      queryParameters: <String, String>{
+        'lat': lat.toString(),
+        'lng': lng.toString(),
+        'radius_km': radiusKm.toString(),
+        if (query.isNotEmpty) 'query': query,
+      },
+    );
+    final json = await _getJson(uri);
+    final raw = json is Map<String, dynamic> ? json['restaurants'] : json;
+    if (raw is! List) {
+      return <RestaurantPin>[];
+    }
+    return raw.whereType<Map<String, dynamic>>().map(RestaurantPin.fromJson).toList();
+  }
+
+  Future<List<MenuSummary>> fetchRestaurantMenus(
+    String resId, {
+    required double lat,
+    required double lng,
+  }) async {
+    final uri = Uri.parse('$baseUrl/api/restaurant/$resId/menus').replace(
+      queryParameters: <String, String>{
+        'lat': lat.toString(),
+        'lng': lng.toString(),
+      },
+    );
+    final json = await _getJson(uri);
+    final raw = json is Map<String, dynamic> ? json['results'] : json;
+    if (raw is! List) {
+      return <MenuSummary>[];
+    }
+    return raw.whereType<Map<String, dynamic>>().map(MenuSummary.fromJson).toList();
+  }
+
   Future<List<CoreInfo>> fetchMenuDetails(String menuId) async {
     final uri = Uri.parse('$baseUrl/api/menu/$menuId/details');
     final json = await _getJson(uri);
@@ -1217,7 +1469,11 @@ class ApiClient {
     return rawDetails.whereType<Map<String, dynamic>>().map(CoreInfo.fromJson).toList();
   }
 
-  Future<void> vote({required int infoId, required bool isUpvote}) async {
+  Future<void> vote({
+    required int infoId,
+    required String vote,
+    required String previous,
+  }) async {
     final uri = Uri.parse('$baseUrl/api/vote');
     final response = await http.post(
       uri,
@@ -1227,7 +1483,8 @@ class ApiClient {
       },
       body: jsonEncode(<String, dynamic>{
         'info_id': infoId.toInt(),
-        'upvote': isUpvote,
+        'vote': vote,
+        'previous': previous,
       }),
     ).timeout(const Duration(seconds: 4));
     if (response.statusCode < 200 || response.statusCode >= 300) {
@@ -1250,6 +1507,8 @@ class ApiClient {
 class MenuSummary {
   const MenuSummary({
     required this.menuId,
+    required this.resId,
+    required this.restaurantName,
     required this.menuName,
     required this.price,
     required this.latitude,
@@ -1260,6 +1519,8 @@ class MenuSummary {
   });
 
   final String menuId;
+  final String resId;
+  final String restaurantName;
   final String menuName;
   final int price;
   final double latitude;
@@ -1282,6 +1543,8 @@ class MenuSummary {
   factory MenuSummary.fromJson(Map<String, dynamic> json) {
     return MenuSummary(
       menuId: '${json['menu_id'] ?? ''}',
+      resId: '${json['res_id'] ?? ''}',
+      restaurantName: '${json['restaurant_name'] ?? ''}',
       menuName: '${json['menu_name'] ?? json['name'] ?? '이름 없는 메뉴'}',
       price: _asInt(json['price'] ?? 0),
       latitude: _asDouble(json['lat'] ?? json['latitude'] ?? 0),
@@ -1310,6 +1573,9 @@ class CoreInfo {
   int upvotes;
   int downvotes;
 
+  // 이 기기에서 누른 투표 상태: 'none' | 'up' | 'down' (두 번 누르면 취소)
+  String userVote = 'none';
+
   factory CoreInfo.fromJson(Map<String, dynamic> json) {
     return CoreInfo(
       infoId: _asInt(json['info_id'] ?? 0),
@@ -1318,6 +1584,35 @@ class CoreInfo {
       level: _asInt(json['level'] ?? 0),
       upvotes: _asInt(json['upvotes'] ?? 0),
       downvotes: _asInt(json['downvotes'] ?? 0),
+    );
+  }
+}
+
+class RestaurantPin {
+  const RestaurantPin({
+    required this.resId,
+    required this.name,
+    required this.latitude,
+    required this.longitude,
+    required this.category,
+    required this.menuCount,
+  });
+
+  final String resId;
+  final String name;
+  final double latitude;
+  final double longitude;
+  final String category;
+  final int menuCount;
+
+  factory RestaurantPin.fromJson(Map<String, dynamic> json) {
+    return RestaurantPin(
+      resId: '${json['res_id'] ?? ''}',
+      name: '${json['res_name'] ?? '이름 없는 식당'}',
+      latitude: _asDouble(json['lat'] ?? 0),
+      longitude: _asDouble(json['lng'] ?? 0),
+      category: '${json['category'] ?? ''}',
+      menuCount: _asInt(json['menu_count'] ?? 0),
     );
   }
 }

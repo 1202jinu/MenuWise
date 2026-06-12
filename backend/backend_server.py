@@ -55,7 +55,7 @@ db_init_error = None
 try:
     from crawler.database_and_crawler import MenuWiseDB
 
-    db = MenuWiseDB(os.getenv("MENUWISE_DB_PATH", "menu_wise.db"))
+    db = MenuWiseDB(os.getenv("MENUWISE_DB_PATH", str(Path(__file__).resolve().parents[1] / "menu_wise.db")))
 except Exception as exc:  # 서버는 띄우되 /health에서 원인을 확인할 수 있게 둔다.
     db_init_error = str(exc)
 
@@ -137,7 +137,8 @@ DUMMY_SUMMARY = {
 
 class VoteRequest(BaseModel):
     info_id: int
-    upvote: bool
+    vote: str = "none"      # 'up' | 'down' | 'none' (현재 누른 상태)
+    previous: str = "none"  # 'up' | 'down' | 'none' (직전 상태, 취소/전환 계산용)
 
 
 def _require_db():
@@ -193,6 +194,48 @@ def _fetch_photo_urls(menu_id: str) -> List[str]:
         (menu_id,),
     )
     return [row[0] for row in cursor.fetchall() if row[0]]
+
+
+def _fetch_restaurant_photo_urls(res_id: str) -> List[str]:
+    """해당 식당의 사진 후보 URL만 반환한다(다른 식당 사진은 섞이지 않는다)."""
+    if not res_id:
+        return []
+
+    database = _require_db()
+    cursor = database.conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT photo_url FROM restaurant_photos WHERE res_id = ?",
+            (res_id,),
+        )
+    except Exception:
+        # 구버전 DB에 restaurant_photos 테이블이 없을 수 있다.
+        return []
+    return [row[0] for row in cursor.fetchall() if row[0]]
+
+
+def _summary_from_core_info(core_info: List[dict]):
+    """저장된 core_info 목록을 프론트 요약 응답(level_1/level_2) 형식으로 변환한다."""
+    level_1 = {"pros": "", "cons": ""}
+    level_2: List[dict] = []
+
+    for item in core_info:
+        content = (item.get("content") or "").strip()
+        info_type = item.get("info_type") or "PROS"
+        level = item.get("level")
+
+        if not content:
+            continue
+
+        if level == 1:
+            if info_type == "PROS" and not level_1["pros"]:
+                level_1["pros"] = content
+            elif info_type == "CONS" and not level_1["cons"]:
+                level_1["cons"] = content
+        elif level == 2:
+            level_2.append({"content": content, "type": info_type})
+
+    return level_1, level_2
 
 
 def _save_ai_summary(menu_id: str, summary: dict) -> None:
@@ -286,6 +329,7 @@ async def search_menus(
             lng=lng,
             radius_km=resolved_radius,
             keywords=_split_keywords(keywords),
+            search_mode=search_mode,
         )
         results.sort(key=lambda item: item.get("distance_km", float("inf")))
         return {"results": results}
@@ -324,7 +368,6 @@ async def get_menu_summary(menu_id: str):
         return DUMMY_SUMMARY
 
     database = _require_db()
-    ai_processor = _require_ai()
 
     try:
         menu_data = database.get_menu_details(menu_id)
@@ -332,28 +375,42 @@ async def get_menu_summary(menu_id: str):
             raise HTTPException(status_code=404, detail=f"menu_id '{menu_id}'에 해당하는 메뉴가 없습니다.")
 
         menu_name = menu_data["menu_name"]
-        review_texts = _fetch_review_texts(menu_id)
-        if not review_texts:
-            review_texts = [item["content"] for item in menu_data.get("core_info", []) if item.get("content")]
+        core_info = menu_data.get("core_info", [])
 
-        summary = await ai_processor.analyze_reviews(menu_name, review_texts)
-        _save_ai_summary(menu_id, summary)
+        # 크롤링 단계에서 만들어 둔 핵심 요약을 우선 사용한다.
+        level_1, level_2 = _summary_from_core_info(core_info)
 
-        image_urls = _fetch_photo_urls(menu_id)
-        fallback_photo = menu_data.get("photo_url") or ""
-        best_photo = fallback_photo
+        # 저장된 요약이 전혀 없을 때만 실시간 AI 요약을 수행한다.
+        if not level_1["pros"] and not level_1["cons"] and not level_2:
+            ai_processor = _require_ai()
+            review_texts = _fetch_review_texts(menu_id)
+            if not review_texts:
+                review_texts = [item["content"] for item in core_info if item.get("content")]
 
-        if image_urls:
-            matched_photo = await run_in_threadpool(ai_processor.match_photo, menu_name, image_urls)
-            if matched_photo and matched_photo != "default_url":
-                best_photo = matched_photo
+            summary = await ai_processor.analyze_reviews(menu_name, review_texts)
+            _save_ai_summary(menu_id, summary)
+            level_1 = summary.get("level_1", level_1)
+            level_2 = summary.get("level_2", level_2)
+
+        # 메뉴에 매칭된 대표 사진이 없을 때만, 같은 식당 사진 풀에서 다시 매칭한다.
+        best_photo = menu_data.get("photo_url") or ""
+        if not best_photo and processor is not None:
+            res_id = menu_data.get("restaurant", {}).get("res_id", "")
+            image_urls = _fetch_photo_urls(menu_id)
+            if not image_urls:
+                image_urls = _fetch_restaurant_photo_urls(res_id)
+
+            if image_urls:
+                matched_photo = await run_in_threadpool(processor.match_photo, menu_name, image_urls)
+                if matched_photo and matched_photo != "default_url":
+                    best_photo = matched_photo
 
         return {
             "menu_id": menu_id,
             "menu_name": menu_name,
             "photo_url": best_photo,
-            "level_1": summary.get("level_1", {}),
-            "level_2": summary.get("level_2", []),
+            "level_1": level_1,
+            "level_2": level_2,
         }
     except HTTPException:
         raise
@@ -361,17 +418,87 @@ async def get_menu_summary(menu_id: str):
         raise HTTPException(status_code=500, detail=f"AI 요약 중 오류 발생: {exc}") from exc
 
 
+@app.get(
+    "/api/restaurants",
+    summary="주변 식당 목록",
+    description="메뉴가 있는 주변 식당 전체를 반환합니다(지도 핀용).",
+)
+async def get_restaurants(
+    lat: Optional[float] = None,
+    lng: Optional[float] = None,
+    radius: Optional[float] = Query(default=None),
+    radius_km: Optional[float] = Query(default=None),
+    query: Optional[str] = None,
+):
+    if USE_DUMMY:
+        seen = {}
+        for item in DUMMY_SEARCH_RESULTS:
+            seen.setdefault(item["restaurant_name"], {
+                "res_id": item["menu_id"],
+                "res_name": item["restaurant_name"],
+                "lat": item["lat"],
+                "lng": item["lng"],
+                "category": item["category"],
+                "menu_count": 1,
+                "distance_km": item["distance_km"],
+            })
+        return {"restaurants": list(seen.values())}
+
+    database = _require_db()
+    resolved_radius = radius_km if radius_km is not None else radius
+
+    try:
+        restaurants = database.get_restaurants_with_menus(
+            lat=lat,
+            lng=lng,
+            radius_km=resolved_radius,
+            keyword=query,
+        )
+        return {"restaurants": restaurants}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"식당 조회 중 오류 발생: {exc}") from exc
+
+
+@app.get(
+    "/api/restaurant/{res_id}/menus",
+    summary="식당의 메뉴 목록",
+    description="해당 식당의 모든 메뉴를 검색 결과와 동일한 형식으로 반환합니다.",
+)
+async def get_restaurant_menus(
+    res_id: str,
+    lat: Optional[float] = None,
+    lng: Optional[float] = None,
+):
+    if USE_DUMMY:
+        return {"results": DUMMY_SEARCH_RESULTS}
+
+    database = _require_db()
+    try:
+        results = database.get_menus_by_restaurant(res_id, lat=lat, lng=lng)
+        if not results:
+            raise HTTPException(status_code=404, detail=f"res_id '{res_id}'의 메뉴가 없습니다.")
+        return {"results": results}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"식당 메뉴 조회 중 오류 발생: {exc}") from exc
+
+
 @app.post(
     "/api/vote",
-    summary="리뷰 추천/비추천",
-    description="info_id에 해당하는 핵심 정보에 추천 또는 비추천을 반영합니다.",
+    summary="리뷰 추천/비추천(토글)",
+    description="같은 버튼을 두 번 누르면 취소됩니다. previous/vote는 'up'|'down'|'none'.",
 )
 async def vote(request: VoteRequest):
+    valid = {"up", "down", "none"}
+    vote_value = request.vote if request.vote in valid else "none"
+    previous = request.previous if request.previous in valid else "none"
+
     if USE_DUMMY:
         return {
             "message": f"info_id {request.info_id} 투표 완료 (더미)",
             "info_id": request.info_id,
-            "upvote": request.upvote,
+            "vote": vote_value,
             "upvotes": 0,
             "downvotes": 0,
         }
@@ -379,14 +506,14 @@ async def vote(request: VoteRequest):
     database = _require_db()
 
     try:
-        result = database.vote(request.info_id, request.upvote)
+        result = database.apply_vote(request.info_id, previous, vote_value)
         if result is None:
             raise HTTPException(status_code=404, detail=f"info_id {request.info_id}를 찾을 수 없습니다.")
 
         return {
             "message": "투표가 반영되었습니다.",
             "info_id": result["info_id"],
-            "upvote": request.upvote,
+            "vote": vote_value,
             "upvotes": result["upvotes"],
             "downvotes": result["downvotes"],
         }

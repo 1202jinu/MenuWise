@@ -1,21 +1,48 @@
+# ===== Python =====
 __pycache__/
 *.py[cod]
 *$py.class
+*.egg-info/
+.pytest_cache/
 .venv/
 venv/
+
+# ===== 환경변수 / 비밀키 (절대 커밋 금지) =====
 .env
+.env.*
+# .env.example 템플릿은 커밋 허용
+!.env.example
+*.key
+*.pem
+*.p12
+secrets.json
+credentials.json
+# 프론트 구글맵 키 주입 파일(사용 시)
+**/maps_key.js
+
+# ===== 데이터베이스 / 스크래핑 데이터 =====
 *.db
 *.sqlite
 *.sqlite3
-crawler/ai_crawl_input.txt
-crawler/apify_reviews.json
+menu_wise.db
+
+# ===== 크롤러 산출물 =====
+# 실제 Google API 키가 photo URL(&key=AIza...)에 포함되어 있어 반드시 무시
 crawler/google_crawl_preview.txt
+# 대용량 원본 덤프(현재 파이프라인 미사용)
+crawler/apify_reviews.json
 crawler/google_place_candidates.txt
-crawler/*_crawl_input.txt
-crawler/*_crawl_preview.txt
-crawler/*_place_candidates.txt
-crawler/*reviews*.json
-crawler/*_reviews.json
-*.log
+# 참고: crawler/ai_crawl_input.txt 는 파이프라인 입력 데이터(키 없음)라 커밋 대상으로 남겨둠
+
+# ===== Flutter 빌드/도구 산출물 =====
+# (frontend/.gitignore가 처리하지만 루트에서도 방어적으로 무시)
+frontend/build/
+frontend/.dart_tool/
+frontend/.flutter-plugins
+frontend/.flutter-plugins-dependencies
+
+# ===== IDE / OS =====
 .vscode/
 .idea/
+.DS_Store
+Thumbs.db
