@@ -1,7 +1,150 @@
 import sqlite3
 import math
+import hashlib
+import json
+import os
 import re
 import time
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+
+
+DEFAULT_MENU_PRICE = 0
+APIFY_REVIEW_LIMIT_PER_PLACE = 40
+APIFY_PHOTO_LIMIT_PER_PLACE = 30
+
+
+def load_apify_reviews_from_file(path):
+    """Apify Dataset에서 내려받은 JSON 파일을 읽는다."""
+    with open(path, "r", encoding="utf-8") as file:
+        data = json.load(file)
+
+    if isinstance(data, dict):
+        return data.get("items", [])
+
+    if isinstance(data, list):
+        return data
+
+    return []
+
+
+def group_apify_reviews_by_place(items):
+    """Apify 리뷰 단위 output을 Google place_id 기준으로 묶는다."""
+    grouped = {}
+
+    for item in items:
+        place_id = item.get("place_id")
+        if not place_id:
+            continue
+
+        grouped.setdefault(place_id, []).append(item)
+
+    return grouped
+
+
+def convert_apify_groups_to_restaurant_data(
+    grouped_items,
+    review_limit=APIFY_REVIEW_LIMIT_PER_PLACE,
+    photo_limit=APIFY_PHOTO_LIMIT_PER_PLACE,
+):
+    """Apify 리뷰 output을 MenuWiseDB.save_restaurant_data 입력 형식으로 변환한다."""
+    restaurants = []
+
+    for place_id, reviews in grouped_items.items():
+        if not reviews:
+            continue
+
+        first = reviews[0]
+        res_id = f"GOOGLE_{place_id}"
+        menu_id = f"{res_id}_MENU"
+        place_name = first.get("place_name") or "이름 없는 식당"
+        location = first.get("location") or {}
+        photo_urls = _collect_apify_photo_urls(reviews, photo_limit)
+
+        restaurants.append({
+            "restaurant": {
+                "res_id": res_id,
+                "res_name": place_name,
+                "lat": location.get("lat"),
+                "lng": location.get("lng"),
+                "category": _first_value(first.get("categories")) or first.get("category", ""),
+            },
+            "menus": [
+                {
+                    "menu_id": menu_id,
+                    "menu_name": f"{place_name} 대표 메뉴",
+                    "price": DEFAULT_MENU_PRICE,
+                    "photo_url": photo_urls[0] if photo_urls else first.get("place_photo_url", ""),
+                }
+            ],
+            "reviews": _convert_apify_reviews(res_id, menu_id, reviews, review_limit),
+            "source": {
+                "provider": "apify_google_maps_reviews",
+                "place_id": place_id,
+                "place_rating": first.get("place_rating"),
+                "place_reviews_count": first.get("place_reviews_count"),
+                "photo_urls": photo_urls,
+                "full_address": first.get("full_address", ""),
+            },
+        })
+
+    return restaurants
+
+
+def _collect_apify_photo_urls(reviews, limit):
+    photo_urls = []
+    seen = set()
+
+    for review in reviews:
+        candidates = []
+        if review.get("place_photo_url"):
+            candidates.append(review["place_photo_url"])
+        candidates.extend(review.get("review_photos_urls") or [])
+
+        for url in candidates:
+            if not url or url in seen:
+                continue
+
+            seen.add(url)
+            photo_urls.append(url)
+
+            if len(photo_urls) >= limit:
+                return photo_urls
+
+    return photo_urls
+
+
+def _convert_apify_reviews(res_id, menu_id, reviews, limit):
+    converted = []
+    seen = set()
+
+    for index, review in enumerate(reviews):
+        content = str(review.get("content") or "").strip()
+        if not content or content in seen:
+            continue
+
+        seen.add(content)
+        review_id = review.get("review_id") or f"{res_id}_APIFY_{index}"
+        photo_urls = review.get("review_photos_urls") or []
+
+        converted.append({
+            "review_id": review_id,
+            "menu_id": menu_id,
+            "content": content,
+            "photo_url": photo_urls[0] if photo_urls else "",
+        })
+
+        if len(converted) >= limit:
+            break
+
+    return converted
+
+
+def _first_value(value):
+    if isinstance(value, list) and value:
+        return value[0]
+
+    return value
 
 
 class MenuWiseDB:
@@ -520,35 +663,76 @@ class MenuWiseDB:
 
 
 class ReviewCrawler:
-    def crawl_restaurant_info(self, keyword):
-        """지도 플랫폼에서 식당, 메뉴명, 가격, 사진 URL을 수집합니다.
-        현재는 실제 크롤링 전 단계이므로 mock 데이터 반환
+    """공식/공개 API 기반 음식점 수집기.
+
+    GOOGLE_PLACES_API_KEY가 있으면 Google Places API로 식당, 사진, 일부 리뷰를 조회합니다.
+    Google 키가 없으면 KAKAO_REST_API_KEY로 카카오 Local API를 사용합니다.
+    지도 API는 메뉴명/가격을 안정적으로 제공하지 않으므로 대표 메뉴 placeholder를 생성합니다.
+    """
+
+    KANGWON_UNIV_LAT = 37.8683
+    KANGWON_UNIV_LNG = 127.7445
+
+    def __init__(self, center_lat=None, center_lng=None, radius_m=1500):
+        self._load_env_files()
+        self.center_lat = center_lat or self.KANGWON_UNIV_LAT
+        self.center_lng = center_lng or self.KANGWON_UNIV_LNG
+        self.radius_m = radius_m
+        self.google_api_key = os.getenv("GOOGLE_PLACES_API_KEY")
+        self.kakao_api_key = os.getenv("KAKAO_REST_API_KEY")
+        self.place_names = {}
+
+    def crawl_restaurant_info(self, keyword="강원대", lat=None, lng=None, radius_m=None, limit=15):
+        """춘천 강원대 주변 음식점을 실제 API로 조회합니다.
+
+        카카오 Local API 키가 없으면 기존 개발 흐름을 위해 mock 데이터를 반환합니다.
         """
-        return [
-            {
+        lat = lat if lat is not None else self.center_lat
+        lng = lng if lng is not None else self.center_lng
+        radius_m = radius_m or self.radius_m
+
+        if self.google_api_key:
+            return self._crawl_google_restaurant_info_max(keyword, lat, lng, radius_m, limit)
+
+        if not self.kakao_api_key:
+            return self._mock_restaurant_info(keyword, lat, lng)
+
+        documents = self._search_kakao_restaurants(keyword, lat, lng, radius_m, limit)
+        restaurants = []
+
+        for place in documents:
+            res_id = f"KAKAO_{place.get('id')}"
+            res_name = place.get("place_name") or "이름 없는 식당"
+            category = self._last_category(place.get("category_name", ""))
+            menu_id = f"{res_id}_MENU"
+            self.place_names[res_id] = res_name
+
+            restaurants.append({
                 "restaurant": {
-                    "res_id": "R001",
-                    "res_name": f"{keyword} 맛집 1호점",
-                    "lat": 37.5665,
-                    "lng": 126.9780,
-                    "category": "한식"
+                    "res_id": res_id,
+                    "res_name": res_name,
+                    "lat": self._safe_float(place.get("y")),
+                    "lng": self._safe_float(place.get("x")),
+                    "category": category or "음식점",
                 },
                 "menus": [
                     {
-                        "menu_id": "M001",
-                        "menu_name": "김치찌개",
-                        "price": 9000,
-                        "photo_url": "https://example.com/kimchi.jpg"
-                    },
-                    {
-                        "menu_id": "M002",
-                        "menu_name": "된장찌개",
-                        "price": 8500,
-                        "photo_url": "https://example.com/doenjang.jpg"
+                        "menu_id": menu_id,
+                        "menu_name": f"{res_name} 대표 메뉴",
+                        "price": 0,
+                        "photo_url": "",
                     }
-                ]
-            }
-        ]
+                ],
+                "source": {
+                    "provider": "kakao_local",
+                    "place_url": place.get("place_url", ""),
+                    "address": place.get("road_address_name") or place.get("address_name", ""),
+                    "phone": place.get("phone", ""),
+                },
+            })
+
+        return restaurants
+
     def crawl_reviews_with_retry(self, res_id, max_retries=3, delay=1):
         """리뷰 크롤링 실패 시 일정 횟수 재시도합니다."""
         for attempt in range(1, max_retries + 1):
@@ -568,35 +752,408 @@ class ReviewCrawler:
         return []
 
     def crawl_reviews(self, res_id):
-        """특정 식당의 리뷰 원문 데이터 전체를 수집하여 저장합니다.
-        현재는 실제 크롤링 전 단계이므로 mock 데이터 반환
+        """Google Places API로 일부 장소 리뷰를 조회합니다.
+
+        Kakao Local API는 리뷰 본문을 제공하지 않으므로 Kakao 장소는 빈 리스트를 반환합니다.
         """
         if res_id == "R001":
-            return [
-                {
-                    "review_id": "RV001",
-                    "menu_id": "M001",
-                    "content": "김치찌개가 얼큰하고 맛있었지만 조금 짰어요.",
-                    "photo_url": "https://example.com/review1.jpg"
-                },
-                {
-                    "review_id": "RV002",
-                    "menu_id": "M002",
-                    "content": "된장찌개가 구수하고 가격도 괜찮아요.",
-                    "photo_url": "https://example.com/review2.jpg"
-                },
-                {
-                    "review_id": "RV003",
-                    "menu_id": "M001",
-                    "content": "김치찌개가 얼큰해서 좋았는데 조금 짰어요.",
-                    "photo_url": None
-                },
-                {
-                    "review_id": "RV004",
-                    "menu_id": "M002",
-                    "content": "된장찌개 양이 많고 맛도 무난했어요.",
-                    "photo_url": None
-                }
-            ]
+            return self._mock_reviews()
 
-        return []
+        if not res_id.startswith("GOOGLE_") or not self.google_api_key:
+            return []
+
+        place_id = res_id.replace("GOOGLE_", "", 1)
+        return self._crawl_google_reviews_max(place_id)
+
+    def _crawl_google_restaurant_info_max(self, keyword, lat, lng, radius_m, limit):
+        results = []
+        seen_place_ids = set()
+        next_page_token = None
+
+        while len(results) < limit:
+            params = {
+                "location": f"{lat},{lng}",
+                "radius": radius_m,
+                "type": "restaurant",
+                "language": "ko",
+                "key": self.google_api_key,
+            }
+
+            if next_page_token:
+                time.sleep(2)
+                params = {
+                    "pagetoken": next_page_token,
+                    "key": self.google_api_key,
+                }
+
+            data = self._request_json(
+                "https://maps.googleapis.com/maps/api/place/nearbysearch/json",
+                params=params,
+            )
+
+            for place in data.get("results", []):
+                place_id = place.get("place_id")
+                if not place_id or place_id in seen_place_ids:
+                    continue
+
+                seen_place_ids.add(place_id)
+                results.append(place)
+
+                if len(results) >= limit:
+                    break
+
+            next_page_token = data.get("next_page_token")
+            if not next_page_token:
+                break
+
+        results.sort(
+            key=lambda item: item.get("user_ratings_total", 0),
+            reverse=True,
+        )
+
+        restaurants = []
+        for place in results[:limit]:
+            place_id = place.get("place_id")
+            if not place_id:
+                continue
+
+            detail = self._google_place_details(
+                place_id,
+                fields="photos,formatted_phone_number,user_ratings_total,rating",
+            )
+            detail_result = detail.get("result", {})
+            res_id = f"GOOGLE_{place_id}"
+            res_name = place.get("name") or "이름 없는 식당"
+            geometry = place.get("geometry", {}).get("location", {})
+            category = self._google_category(place.get("types", []))
+            photo_urls = self._google_photo_urls(
+                detail_result.get("photos") or place.get("photos", []),
+                limit=10,
+            )
+            menu_id = f"{res_id}_MENU"
+            self.place_names[res_id] = res_name
+
+            restaurants.append({
+                "restaurant": {
+                    "res_id": res_id,
+                    "res_name": res_name,
+                    "lat": self._safe_float(geometry.get("lat")),
+                    "lng": self._safe_float(geometry.get("lng")),
+                    "category": category,
+                },
+                "menus": [
+                    {
+                        "menu_id": menu_id,
+                        "menu_name": f"{res_name} 대표 메뉴",
+                        "price": 0,
+                        "photo_url": photo_urls[0] if photo_urls else "",
+                    }
+                ],
+                "source": {
+                    "provider": "google_places",
+                    "place_url": f"https://www.google.com/maps/place/?q=place_id:{place_id}",
+                    "address": place.get("formatted_address", ""),
+                    "phone": detail_result.get("formatted_phone_number", ""),
+                    "photo_urls": photo_urls,
+                    "rating": detail_result.get("rating") or place.get("rating", 0),
+                    "user_ratings_total": (
+                        detail_result.get("user_ratings_total")
+                        or place.get("user_ratings_total", 0)
+                    ),
+                },
+            })
+
+        return restaurants
+
+    def _crawl_google_restaurant_info(self, keyword, lat, lng, radius_m, limit):
+        data = self._request_json(
+            "https://maps.googleapis.com/maps/api/place/textsearch/json",
+            params={
+                "query": f"{keyword} 음식점",
+                "location": f"{lat},{lng}",
+                "radius": radius_m,
+                "language": "ko",
+                "key": self.google_api_key,
+            },
+        )
+
+        restaurants = []
+        for place in data.get("results", [])[:limit]:
+            place_id = place.get("place_id")
+            if not place_id:
+                continue
+
+            detail = self._google_place_details(
+                place_id,
+                fields="photos,formatted_phone_number",
+            )
+            detail_result = detail.get("result", {})
+            res_id = f"GOOGLE_{place_id}"
+            res_name = place.get("name") or "이름 없는 식당"
+            geometry = place.get("geometry", {}).get("location", {})
+            category = self._google_category(place.get("types", []))
+            photo_urls = self._google_photo_urls(
+                detail_result.get("photos") or place.get("photos", []),
+                limit=5,
+            )
+            menu_id = f"{res_id}_MENU"
+            self.place_names[res_id] = res_name
+
+            restaurants.append({
+                "restaurant": {
+                    "res_id": res_id,
+                    "res_name": res_name,
+                    "lat": self._safe_float(geometry.get("lat")),
+                    "lng": self._safe_float(geometry.get("lng")),
+                    "category": category,
+                },
+                "menus": [
+                    {
+                        "menu_id": menu_id,
+                        "menu_name": f"{res_name} 대표 메뉴",
+                        "price": 0,
+                        "photo_url": photo_urls[0] if photo_urls else "",
+                    }
+                ],
+                "source": {
+                    "provider": "google_places",
+                    "place_url": f"https://www.google.com/maps/place/?q=place_id:{place_id}",
+                    "address": place.get("formatted_address", ""),
+                    "phone": detail_result.get("formatted_phone_number", ""),
+                    "photo_urls": photo_urls,
+                },
+            })
+
+        return restaurants
+
+    def _search_kakao_restaurants(self, keyword, lat, lng, radius_m, limit):
+        documents = []
+        page = 1
+
+        while len(documents) < limit and page <= 3:
+            params = {
+                "query": keyword,
+                "category_group_code": "FD6",
+                "x": lng,
+                "y": lat,
+                "radius": radius_m,
+                "sort": "distance",
+                "size": min(15, limit - len(documents)),
+                "page": page,
+            }
+            data = self._request_json(
+                "https://dapi.kakao.com/v2/local/search/keyword.json",
+                params=params,
+                headers={"Authorization": f"KakaoAK {self.kakao_api_key}"},
+            )
+            documents.extend(data.get("documents", []))
+
+            if data.get("meta", {}).get("is_end", True):
+                break
+
+            page += 1
+
+        return documents[:limit]
+
+    def _crawl_google_reviews_max(self, place_id, limit=40):
+        reviews = []
+        seen_contents = set()
+        menu_id = f"GOOGLE_{place_id}_MENU"
+
+        for sort in ("most_relevant", "newest"):
+            detail_data = self._google_place_details(
+                place_id,
+                fields="reviews",
+                reviews_sort=sort,
+            )
+
+            for item in detail_data.get("result", {}).get("reviews", []):
+                content = item.get("text", "").strip()
+                if not content or content in seen_contents:
+                    continue
+
+                seen_contents.add(content)
+                review_hash = hashlib.md5(content.encode("utf-8")).hexdigest()[:12]
+                reviews.append({
+                    "review_id": f"GOOGLE_{place_id}_{sort}_{review_hash}",
+                    "menu_id": menu_id,
+                    "content": content,
+                    "photo_url": None,
+                    "rating": item.get("rating"),
+                    "relative_time_description": item.get("relative_time_description", ""),
+                })
+
+                if len(reviews) >= limit:
+                    return reviews
+
+        return reviews
+
+    def _crawl_google_reviews(self, place_id):
+        detail_data = self._google_place_details(place_id, fields="reviews")
+
+        reviews = []
+        menu_id = f"GOOGLE_{place_id}_MENU"
+        for item in detail_data.get("result", {}).get("reviews", []):
+            content = item.get("text", "")
+            if not content:
+                continue
+
+            review_hash = hashlib.md5(content.encode("utf-8")).hexdigest()[:12]
+            reviews.append({
+                "review_id": f"GOOGLE_{place_id}_{review_hash}",
+                "menu_id": menu_id,
+                "content": content,
+                "photo_url": None,
+            })
+
+        return reviews
+
+    def _google_place_details(self, place_id, fields, reviews_sort=None):
+        params = {
+            "place_id": place_id,
+            "fields": fields,
+            "language": "ko",
+            "key": self.google_api_key,
+        }
+
+        if reviews_sort:
+            params["reviews_sort"] = reviews_sort
+
+        return self._request_json(
+            "https://maps.googleapis.com/maps/api/place/details/json",
+            params=params,
+        )
+
+    def _google_photo_urls(self, photos, limit=5):
+        if not photos:
+            return []
+
+        urls = []
+        for photo in photos[:limit]:
+            reference = photo.get("photo_reference")
+            if not reference:
+                continue
+
+            params = urlencode({
+                "maxwidth": 800,
+                "photo_reference": reference,
+                "key": self.google_api_key,
+            })
+            urls.append(f"https://maps.googleapis.com/maps/api/place/photo?{params}")
+
+        return urls
+
+    def _google_category(self, types):
+        category_map = {
+            "bakery": "제과,베이커리",
+            "bar": "주점",
+            "cafe": "카페",
+            "meal_delivery": "배달음식",
+            "meal_takeaway": "포장음식",
+            "restaurant": "음식점",
+        }
+
+        for item in types:
+            if item in category_map:
+                return category_map[item]
+
+        return "음식점"
+
+    def _request_json(self, url, params=None, headers=None, timeout=10):
+        params = params or {}
+        headers = headers or {}
+        full_url = f"{url}?{urlencode(params)}" if params else url
+        request = Request(full_url, headers=headers)
+
+        with urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def _load_env_files(self):
+        """python-dotenv 없이 루트/크롤러 .env의 API 키를 읽습니다."""
+        candidates = [
+            os.path.join(os.getcwd(), ".env"),
+            os.path.join(os.path.dirname(__file__), ".env"),
+            os.path.join(os.path.dirname(__file__), "..", ".env"),
+        ]
+
+        for path in candidates:
+            path = os.path.abspath(path)
+            if not os.path.exists(path):
+                continue
+
+            with open(path, encoding="utf-8") as env_file:
+                for line in env_file:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+
+                    key, value = line.split("=", 1)
+                    key = key.strip().lstrip("\ufeff")
+                    value = value.strip().strip('"').strip("'")
+                    os.environ.setdefault(key, value)
+
+    def _mock_restaurant_info(self, keyword, lat, lng):
+        return [
+            {
+                "restaurant": {
+                    "res_id": "R001",
+                    "res_name": f"{keyword} 맛집 1호점",
+                    "lat": lat,
+                    "lng": lng,
+                    "category": "한식",
+                },
+                "menus": [
+                    {
+                        "menu_id": "M001",
+                        "menu_name": "김치찌개",
+                        "price": 9000,
+                        "photo_url": "https://example.com/kimchi.jpg",
+                    },
+                    {
+                        "menu_id": "M002",
+                        "menu_name": "된장찌개",
+                        "price": 8500,
+                        "photo_url": "https://example.com/doenjang.jpg",
+                    },
+                ],
+            }
+        ]
+
+    def _mock_reviews(self):
+        return [
+            {
+                "review_id": "RV001",
+                "menu_id": "M001",
+                "content": "김치찌개가 얼큰하고 맛있었지만 조금 짰어요.",
+                "photo_url": "https://example.com/review1.jpg",
+            },
+            {
+                "review_id": "RV002",
+                "menu_id": "M002",
+                "content": "된장찌개가 구수하고 가격도 괜찮아요.",
+                "photo_url": "https://example.com/review2.jpg",
+            },
+            {
+                "review_id": "RV003",
+                "menu_id": "M001",
+                "content": "김치찌개가 얼큰해서 좋았는데 조금 짰어요.",
+                "photo_url": None,
+            },
+            {
+                "review_id": "RV004",
+                "menu_id": "M002",
+                "content": "된장찌개 양이 많고 맛도 무난했어요.",
+                "photo_url": None,
+            },
+        ]
+
+    def _last_category(self, category_name):
+        if not category_name:
+            return ""
+        return category_name.split(">")[-1].strip()
+
+    def _safe_float(self, value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
