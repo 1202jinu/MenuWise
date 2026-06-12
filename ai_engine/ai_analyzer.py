@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import re
@@ -13,6 +14,29 @@ from dotenv import load_dotenv
 from PIL import Image
 from sentence_transformers import SentenceTransformer
 from transformers import AutoModel, AutoProcessor
+
+try:
+    # transformers 5.x의 멀티스레드 가중치 로딩이 Windows에서 access violation(세그폴트)을
+    # 일으켜, 단일 스레드 로딩으로 강제한다. (구버전엔 해당 모듈이 없으므로 무시)
+    import transformers.core_model_loading as _core_model_loading
+
+    _core_model_loading.GLOBAL_WORKERS = 1
+except Exception:
+    pass
+
+
+# 곁들임/밑반찬/기본 제공 항목은 메뉴로 취급하지 않는다.
+SIDE_DISH_BLOCKLIST = {
+    "반찬",
+    "밑반찬",
+    "김치",
+    "배추김치",
+    "깍두기",
+    "깍뚜기",
+    "단무지",
+    "공기밥",
+    "밥",
+}
 
 
 class MenuAIProcessor:
@@ -64,6 +88,100 @@ class MenuAIProcessor:
             return self._normalize_menu_extraction_result(result)
         except Exception as exc:
             return self._handle_menu_extraction_error(exc)
+
+    async def build_menu_dataset(
+        self,
+        restaurant_name,
+        reviews,
+        image_urls=None,
+        match_photos=True,
+    ) -> dict:
+        """리뷰 → 메뉴 추출 → 리뷰 매칭 → 메뉴별 핵심정보/대표사진까지 한 번에 만든다.
+
+        반환 형식:
+        {
+            "menus": [
+                {
+                    "menu_name": str,
+                    "confidence": float,
+                    "evidence": str,
+                    "photo_url": str,            # 매칭 실패 시 ""
+                    "core_info": {level_1, level_2},
+                    "reviews": [ {review_id, content, photo_url}, ... ],
+                },
+                ...
+            ],
+            "dropped_review_count": int,         # 메뉴명이 없어 제외된 리뷰 수
+        }
+        """
+        review_records = self._normalize_review_records(reviews)
+        if not review_records:
+            return {"menus": [], "dropped_review_count": 0}
+
+        extraction = await self.extract_menu_names_from_reviews(
+            restaurant_name,
+            [record["content"] for record in review_records],
+        )
+        menu_candidates = extraction.get("menus", [])
+        if not menu_candidates:
+            return {"menus": [], "dropped_review_count": len(review_records)}
+
+        # 1) 리뷰에 메뉴명이 직접 등장하면 그 메뉴에 매칭한다(한 리뷰가 여러 메뉴에 매칭될 수 있다).
+        assignments = {menu["menu_name"]: [] for menu in menu_candidates}
+        matched_review_ids = set()
+
+        for record in review_records:
+            content_norm = self._normalize_for_match(record["content"])
+
+            for menu in menu_candidates:
+                name_norm = self._normalize_for_match(menu["menu_name"])
+                if name_norm and name_norm in content_norm:
+                    assignments[menu["menu_name"]].append(record)
+                    matched_review_ids.add(record["review_id"])
+
+        # 2) 리뷰가 한 건도 매칭되지 않은 메뉴는 근거가 없으므로 제외한다.
+        kept_menus = [menu for menu in menu_candidates if assignments[menu["menu_name"]]]
+        if not kept_menus:
+            return {"menus": [], "dropped_review_count": len(review_records)}
+
+        # 3) 메뉴명과 음식 사진을 매칭한다(음식이 아닌 사진/완전히 다른 음식은 제외).
+        photo_map = {}
+        if match_photos and image_urls:
+            try:
+                matches = self.match_menu_photos(
+                    [menu["menu_name"] for menu in kept_menus],
+                    image_urls,
+                    filter_food=True,
+                )
+                photo_map = {match["menu_name"]: match["photo_url"] for match in matches}
+            except Exception as exc:
+                if os.getenv("AI_DEBUG") == "1":
+                    print(f"[MenuAIProcessor] match_menu_photos failed: {exc}", file=sys.stderr)
+
+        # 4) 메뉴별 핵심 장점/단점 요약을 동시에 생성한다.
+        summaries = await asyncio.gather(*[
+            self.analyze_reviews(
+                menu["menu_name"],
+                [record["content"] for record in assignments[menu["menu_name"]]],
+            )
+            for menu in kept_menus
+        ])
+
+        menus = []
+        for menu, summary in zip(kept_menus, summaries):
+            menus.append({
+                "menu_name": menu["menu_name"],
+                "confidence": menu.get("confidence", 0.0),
+                "evidence": menu.get("evidence", ""),
+                "photo_url": photo_map.get(menu["menu_name"], ""),
+                "core_info": summary,
+                "reviews": assignments[menu["menu_name"]],
+            })
+
+        return {
+            "menus": menus,
+            "dropped_review_count": len(review_records) - len(matched_review_ids),
+        }
 
     def _limit_reviews(self, reviews):
         """LLM token limit 방지를 위해 리뷰 입력을 최대 20개로 제한한다."""
@@ -124,6 +242,7 @@ class MenuAIProcessor:
 - 식당명, 지점명, 감정 표현, 맛 표현, 재료명만 단독으로 쓰인 단어는 제외
 - "맛있다", "매콤하다", "양이 많다"처럼 메뉴명이 아닌 표현은 제외
 - 같은 메뉴는 하나로 합치고, 대표 표기는 가장 자연스러운 한국어 메뉴명으로 작성
+- 김치, 배추김치, 깍두기, 단무지, 반찬, 밑반찬, 공기밥처럼 곁들임/밑반찬/기본 제공 항목은 제외
 - 확실하지 않은 후보는 제외
 - 최대 10개까지만 추출
 - 반드시 순수 JSON만 출력하고, 설명문/마크다운은 금지
@@ -157,6 +276,9 @@ class MenuAIProcessor:
 
             menu_name = str(item.get("menu_name", "")).strip()
             if not menu_name or menu_name in seen:
+                continue
+
+            if menu_name in SIDE_DISH_BLOCKLIST:
                 continue
 
             seen.add(menu_name)
@@ -200,6 +322,38 @@ class MenuAIProcessor:
                 normalized.append(content)
 
         return normalized
+
+    def _normalize_review_records(self, reviews):
+        """리뷰를 {review_id, content, photo_url} 레코드로 정리한다."""
+        if not reviews:
+            return []
+
+        if isinstance(reviews, (str, dict)):
+            reviews = [reviews]
+
+        records = []
+        for index, review in enumerate(reviews):
+            if isinstance(review, dict):
+                content = str(review.get("content", "")).strip()
+                review_id = review.get("review_id") or f"REVIEW_{index}"
+                photo_url = review.get("photo_url") or ""
+            else:
+                content = str(review).strip()
+                review_id = f"REVIEW_{index}"
+                photo_url = ""
+
+            if content:
+                records.append({
+                    "review_id": review_id,
+                    "content": content,
+                    "photo_url": photo_url,
+                })
+
+        return records
+
+    def _normalize_for_match(self, text):
+        """메뉴명-리뷰 부분일치 비교를 위해 공백 제거 + 소문자화한다."""
+        return re.sub(r"\s+", "", str(text).lower())
 
     async def _generate_summary_with_llm(self, prompt: str) -> str:
         self._ensure_openai_client()

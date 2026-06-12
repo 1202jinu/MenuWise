@@ -203,6 +203,15 @@ class MenuWiseDB:
             )
         """)
 
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS restaurant_photos (
+                res_id TEXT NOT NULL,
+                photo_url TEXT NOT NULL,
+                PRIMARY KEY (res_id, photo_url),
+                FOREIGN KEY (res_id) REFERENCES restaurants(res_id)
+            )
+        """)
+
         self.conn.commit()
     def clean_review_text(self, text):
         """리뷰 원문에서 불필요한 공백과 특수문자를 정리합니다."""
@@ -274,6 +283,134 @@ class MenuWiseDB:
             })
 
         return transformed
+
+    def save_restaurant_raw(self, restaurant, reviews, photo_urls=None):
+        """[1단계] AI 가공 전 raw 데이터(식당/리뷰/사진 후보)만 DB에 저장한다.
+
+        리뷰는 아직 메뉴에 매칭되지 않았으므로 menu_id는 NULL로 둔다.
+        """
+        if not self.validate_restaurant_data(restaurant):
+            print("유효하지 않은 식당 데이터입니다. 저장을 건너뜁니다.")
+            return
+
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT OR REPLACE INTO restaurants (res_id, res_name, lat, lng, category)
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            restaurant["res_id"],
+            restaurant["res_name"],
+            restaurant.get("lat"),
+            restaurant.get("lng"),
+            restaurant.get("category"),
+        ))
+
+        for review in reviews or []:
+            if not self.validate_review_data(review):
+                continue
+
+            content = re.sub(r"\s+", " ", str(review.get("content") or "")).strip()
+            if len(content) < 5:
+                continue
+
+            cursor.execute("""
+                INSERT OR IGNORE INTO reviews (review_id, res_id, menu_id, content, photo_url)
+                VALUES (?, ?, NULL, ?, ?)
+            """, (
+                review["review_id"],
+                restaurant["res_id"],
+                content,
+                review.get("photo_url") or "",
+            ))
+
+        self.conn.commit()
+        self.save_restaurant_photos(restaurant["res_id"], photo_urls or [])
+
+    def save_restaurant_photos(self, res_id, photo_urls):
+        """식당 단위 사진 후보 URL을 저장한다(중복은 무시)."""
+        cursor = self.conn.cursor()
+
+        for url in photo_urls or []:
+            if not url:
+                continue
+
+            cursor.execute(
+                "INSERT OR IGNORE INTO restaurant_photos (res_id, photo_url) VALUES (?, ?)",
+                (res_id, url),
+            )
+
+        self.conn.commit()
+
+    def get_restaurant_photos(self, res_id):
+        """식당의 사진 후보 URL 목록을 반환한다."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT photo_url FROM restaurant_photos WHERE res_id = ?",
+            (res_id,),
+        )
+        return [row[0] for row in cursor.fetchall() if row[0]]
+
+    def get_all_restaurants(self):
+        """저장된 모든 식당을 반환한다(2단계 AI 보강의 대상 목록)."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT res_id, res_name, lat, lng, category FROM restaurants ORDER BY res_id"
+        )
+        return [
+            {
+                "res_id": row[0],
+                "res_name": row[1],
+                "lat": row[2],
+                "lng": row[3],
+                "category": row[4],
+            }
+            for row in cursor.fetchall()
+        ]
+
+    def get_reviews_by_restaurant(self, res_id):
+        """식당의 raw 리뷰 목록을 반환한다."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT review_id, content, photo_url
+            FROM reviews
+            WHERE res_id = ?
+            ORDER BY review_id ASC
+            """,
+            (res_id,),
+        )
+        return [
+            {"review_id": row[0], "content": row[1], "photo_url": row[2] or ""}
+            for row in cursor.fetchall()
+        ]
+
+    def clear_ai_enrichment(self, res_id):
+        """[2단계 재실행 대비] 해당 식당의 AI 산출물(메뉴/핵심정보)을 정리하고
+        리뷰의 메뉴 매칭(menu_id)을 초기화한다. raw 리뷰/사진은 그대로 유지된다."""
+        cursor = self.conn.cursor()
+
+        cursor.execute("SELECT menu_id FROM menus WHERE res_id = ?", (res_id,))
+        menu_ids = [row[0] for row in cursor.fetchall()]
+
+        for menu_id in menu_ids:
+            cursor.execute("DELETE FROM core_info WHERE menu_id = ?", (menu_id,))
+
+        cursor.execute("UPDATE reviews SET menu_id = NULL WHERE res_id = ?", (res_id,))
+        cursor.execute("DELETE FROM menus WHERE res_id = ?", (res_id,))
+
+        self.conn.commit()
+
+    def assign_reviews_to_menu(self, review_ids, menu_id):
+        """raw 리뷰를 대표 매칭 메뉴에 연결한다(menu_id UPDATE)."""
+        cursor = self.conn.cursor()
+
+        for review_id in review_ids:
+            cursor.execute(
+                "UPDATE reviews SET menu_id = ? WHERE review_id = ?",
+                (menu_id, review_id),
+            )
+
+        self.conn.commit()
 
     def save_restaurant_data(self, res_data):
         """크롤링한 식당, 메뉴, 리뷰, 핵심 요약 정보를 저장합니다."""
@@ -408,78 +545,211 @@ class MenuWiseDB:
         nearby.sort(key=lambda x: x["distance_km"])
         return nearby
     
-    def search_menus(self, keyword="", lat=None, lng=None, radius_km=3, keywords=None):
-        """백엔드 검색 API용 함수: 키워드, 위치, 반경 기준으로 메뉴 검색 결과를 반환합니다."""
+    def _representative_core(self, menu_id):
+        """대표 장점/단점: (추천 - 비추천)이 가장 높은 코어 정보를 PROS/CONS별로 1개씩 반환."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT content, info_type
+            FROM core_info
+            WHERE menu_id = ?
+            ORDER BY (upvotes - downvotes) DESC, level ASC, info_id ASC
+        """, (menu_id,))
+
+        core_pros = ""
+        core_cons = ""
+        for content, info_type in cursor.fetchall():
+            if info_type == "PROS" and not core_pros:
+                core_pros = content
+            elif info_type == "CONS" and not core_cons:
+                core_cons = content
+            if core_pros and core_cons:
+                break
+
+        return core_pros, core_cons
+
+    def _build_menu_result(self, row, lat=None, lng=None):
+        """검색/식당별 메뉴 조회 공통 결과 dict를 만든다."""
+        res_id, res_name, res_lat, res_lng, category, menu_id, menu_name, price, photo_url = row
+
+        distance_km = 0.0
+        if lat is not None and lng is not None:
+            distance_km = self._calculate_distance(lat, lng, res_lat, res_lng)
+
+        core_pros, core_cons = self._representative_core(menu_id)
+
+        return {
+            "menu_id": menu_id or "",
+            "res_id": res_id or "",
+            "restaurant_name": res_name or "",
+            "menu_name": menu_name or "",
+            "price": price or 0,
+            "photo_url": photo_url or "",
+            "core_pros": core_pros or "",
+            "core_cons": core_cons or "",
+            "distance_km": round(distance_km, 2),
+            "lat": res_lat or 0.0,
+            "lng": res_lng or 0.0,
+            "category": category or "",
+        }
+
+    def search_menus(self, keyword="", lat=None, lng=None, radius_km=3, keywords=None, search_mode=None):
+        """검색 모드(음식점/메뉴/키워드)에 따라 메뉴 검색 결과를 반환한다.
+
+        - 음식점: 식당명/카테고리 매칭
+        - 메뉴: 메뉴명만 매칭 (장단점 텍스트는 매칭에서 제외)
+        - 키워드(또는 기본): 메뉴명/식당명/카테고리 매칭
+        keywords(맛 키워드)가 있으면 메뉴명+장단점에서 추가로 걸러낸다.
+        """
         cursor = self.conn.cursor()
 
-        keyword = keyword or ""
-        search_keyword = f"%{keyword}%"
+        keyword = (keyword or "").strip()
+        like = f"%{keyword}%"
+        mode = (search_mode or "").strip()
 
-        cursor.execute("""
+        base_sql = """
             SELECT
-                r.res_id,
-                r.res_name,
-                r.lat,
-                r.lng,
-                r.category,
-                m.menu_id,
-                m.menu_name,
-                m.price,
-                m.photo_url
+                r.res_id, r.res_name, r.lat, r.lng, r.category,
+                m.menu_id, m.menu_name, m.price, m.photo_url
             FROM restaurants r
             JOIN menus m ON r.res_id = m.res_id
-            WHERE
-                r.res_name LIKE ?
-                OR r.category LIKE ?
-                OR m.menu_name LIKE ?
-        """, (search_keyword, search_keyword, search_keyword))
+        """
 
+        params = []
+        if keyword:
+            if mode == "음식점":
+                base_sql += " WHERE (r.res_name LIKE ? OR r.category LIKE ?)"
+                params = [like, like]
+            elif mode == "메뉴":
+                base_sql += " WHERE m.menu_name LIKE ?"
+                params = [like]
+            else:
+                base_sql += " WHERE (m.menu_name LIKE ? OR r.res_name LIKE ? OR r.category LIKE ?)"
+                params = [like, like, like]
+
+        cursor.execute(base_sql, params)
         rows = cursor.fetchall()
+
         results = []
-
         for row in rows:
-            res_id, res_name, res_lat, res_lng, category, menu_id, menu_name, price, photo_url = row
+            item = self._build_menu_result(row, lat, lng)
 
-            distance_km = 0
-            if lat is not None and lng is not None:
-                distance_km = self._calculate_distance(lat, lng, res_lat, res_lng)
-
-                if distance_km > radius_km:
-                    continue
-
-            cursor.execute("""
-                SELECT content, info_type
-                FROM core_info
-                WHERE menu_id = ? AND level = 1
-            """, (menu_id,))
-            core_rows = cursor.fetchall()
-
-            core_pros = next((item[0] for item in core_rows if item[1] == "PROS"), "")
-            core_cons = next((item[0] for item in core_rows if item[1] == "CONS"), "")
+            if lat is not None and lng is not None and item["distance_km"] > radius_km:
+                continue
 
             if keywords:
-                searchable_text = f"{menu_name} {res_name} {category} {core_pros} {core_cons}".lower()
-                if not any(str(k).lower() in searchable_text for k in keywords):
+                searchable = f"{item['menu_name']} {item['core_pros']} {item['core_cons']}".lower()
+                if not any(str(k).lower() in searchable for k in keywords):
+                    continue
+
+            results.append(item)
+
+        results.sort(key=lambda x: x["distance_km"])
+        return results
+
+    def get_restaurants_with_menus(self, lat=None, lng=None, radius_km=None, keyword=None):
+        """메뉴가 있는 모든 식당을 반환한다(지도 핀용). keyword가 있으면 식당명/카테고리로 거른다."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT r.res_id, r.res_name, r.lat, r.lng, r.category, COUNT(m.menu_id) AS menu_count
+            FROM restaurants r
+            JOIN menus m ON r.res_id = m.res_id
+            GROUP BY r.res_id
+        """)
+        rows = cursor.fetchall()
+
+        keyword = (keyword or "").strip().lower()
+        results = []
+        for res_id, res_name, res_lat, res_lng, category, menu_count in rows:
+            distance_km = 0.0
+            if lat is not None and lng is not None:
+                distance_km = self._calculate_distance(lat, lng, res_lat, res_lng)
+                if radius_km is not None and distance_km > radius_km:
+                    continue
+
+            if keyword:
+                haystack = f"{res_name or ''} {category or ''}".lower()
+                if keyword not in haystack:
                     continue
 
             results.append({
-                "menu_id": menu_id or "",
-                "restaurant_name": res_name or "",
-                "menu_name": menu_name or "",
-                "price": price or 0,
-                "photo_url": photo_url or "",
-                "core_pros": core_pros or "",
-                "core_cons": core_cons or "",
-                "distance_km": round(distance_km, 2),
+                "res_id": res_id or "",
+                "res_name": res_name or "",
                 "lat": res_lat or 0.0,
                 "lng": res_lng or 0.0,
-                "category": category or ""
+                "category": category or "",
+                "menu_count": menu_count,
+                "distance_km": round(distance_km, 2),
             })
+
         results.sort(key=lambda x: x["distance_km"])
         return results
-    
+
+    def get_menus_by_restaurant(self, res_id, lat=None, lng=None):
+        """특정 식당의 메뉴 목록을 검색 결과와 동일한 형식으로 반환한다."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT
+                r.res_id, r.res_name, r.lat, r.lng, r.category,
+                m.menu_id, m.menu_name, m.price, m.photo_url
+            FROM menus m
+            JOIN restaurants r ON m.res_id = r.res_id
+            WHERE m.res_id = ?
+        """, (res_id,))
+        rows = cursor.fetchall()
+
+        return [self._build_menu_result(row, lat, lng) for row in rows]
+
+    def apply_vote(self, info_id, previous, current):
+        """추천/비추천 토글 반영. previous/current는 'up'|'down'|'none'.
+
+        이전 표를 취소(감소)하고 새 표를 반영(증가)해 같은 버튼을 두 번 누르면 취소된다.
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT upvotes, downvotes FROM core_info WHERE info_id = ?",
+            (info_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+
+        upvotes, downvotes = row[0], row[1]
+
+        if previous == "up":
+            upvotes = max(0, upvotes - 1)
+        elif previous == "down":
+            downvotes = max(0, downvotes - 1)
+
+        if current == "up":
+            upvotes += 1
+        elif current == "down":
+            downvotes += 1
+
+        cursor.execute(
+            "UPDATE core_info SET upvotes = ?, downvotes = ? WHERE info_id = ?",
+            (upvotes, downvotes, info_id),
+        )
+        self.conn.commit()
+
+        return {"info_id": info_id, "upvotes": upvotes, "downvotes": downvotes}
+
+    def delete_menus_by_names(self, names):
+        """곁들임/밑반찬 등 제외 대상 메뉴를 삭제한다(연결된 core_info 삭제, 리뷰는 menu_id 해제)."""
+        cursor = self.conn.cursor()
+        deleted = 0
+        for name in names:
+            cursor.execute("SELECT menu_id FROM menus WHERE menu_name = ?", (name,))
+            menu_ids = [r[0] for r in cursor.fetchall()]
+            for menu_id in menu_ids:
+                cursor.execute("DELETE FROM core_info WHERE menu_id = ?", (menu_id,))
+                cursor.execute("UPDATE reviews SET menu_id = NULL WHERE menu_id = ?", (menu_id,))
+                cursor.execute("DELETE FROM menus WHERE menu_id = ?", (menu_id,))
+                deleted += 1
+        self.conn.commit()
+        return deleted
+
     def vote(self, info_id, is_upvote):
-        """백엔드 피드백 API용 함수: 추천/비추천 반영 후 최신 수치를 반환합니다."""
+        """(구버전 호환) 단순 증가."""
         self.update_feedback(info_id, is_upvote)
 
         cursor = self.conn.cursor()
@@ -499,7 +769,7 @@ class MenuWiseDB:
             "upvotes": row[1],
             "downvotes": row[2]
         }
-        
+
     def get_menu_details(self, menu_id):
         """메뉴 상세 정보와 core_info 목록을 백엔드 응답 구조에 맞게 반환합니다."""
         cursor = self.conn.cursor()
@@ -529,7 +799,7 @@ class MenuWiseDB:
             SELECT info_id, menu_id, content, info_type, level, upvotes, downvotes
             FROM core_info
             WHERE menu_id = ?
-            ORDER BY level ASC, upvotes DESC, info_id ASC
+            ORDER BY (upvotes - downvotes) DESC, level ASC, info_id ASC
         """, (menu_id,))
 
         core_rows = cursor.fetchall()
