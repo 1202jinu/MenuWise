@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -7,16 +6,10 @@ import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 import 'package:pointer_interceptor/pointer_interceptor.dart';
 
-import 'package:menu_wise/kakao_map_canvas.dart'
-    if (dart.library.io) 'package:menu_wise/kakao_map_canvas_native.dart'
-    if (dart.library.js_interop) 'package:menu_wise/kakao_map_canvas_web.dart';
-
-const String _kakaoMapKey = String.fromEnvironment('KAKAO_MAP_KEY');
-const String _kakaoJavaScriptKey = String.fromEnvironment('KAKAO_JAVASCRIPT_KEY');
+import 'package:menu_wise/osm_map_canvas.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await initializeKakaoMaps(_kakaoMapKey);
 
   runApp(const MenuWiseApp());
 }
@@ -67,8 +60,8 @@ class _MenuWiseHomePageState extends State<MenuWiseHomePage> {
     TasteKeyword('savory', '구수함', '🍜'),
   ];
 
-  double _lat = 37.5665;
-  double _lng = 126.9780;
+  double _lat = 37.8813;
+  double _lng = 127.7298;
   int _searchRadiusMeters = 500;
   bool _showSettings = false;
   bool _isLoading = false;
@@ -244,6 +237,7 @@ class _MenuWiseHomePageState extends State<MenuWiseHomePage> {
                     isLoading: _isLoading || _isLocating,
                     errorMessage: _errorMessage,
                     onPinTap: _openSheet,
+                    onLocate: _loadCurrentLocationAndSearch,
                     onRetry: _search,
                   ),
                 ),
@@ -377,8 +371,8 @@ class FigmaSearchBar extends StatelessWidget {
                           ),
                           Slider(
                             min: 100,
-                            max: 2000,
-                            divisions: 19,
+                            max: 3000,
+                            divisions: 29,
                             value: searchRadiusMeters.toDouble(),
                             label: _radiusLabel(searchRadiusMeters),
                             onChanged: (value) => onRadiusChange(value.round()),
@@ -388,7 +382,7 @@ class FigmaSearchBar extends StatelessWidget {
                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: <Widget>[
                               Text('100m', style: TextStyle(fontSize: 12, color: AppColors.mutedForeground)),
-                              Text('2km', style: TextStyle(fontSize: 12, color: AppColors.mutedForeground)),
+                              Text('3km', style: TextStyle(fontSize: 12, color: AppColors.mutedForeground)),
                             ],
                           ),
                         ],
@@ -527,6 +521,7 @@ class MapView extends StatelessWidget {
     required this.isLoading,
     required this.errorMessage,
     required this.onPinTap,
+    required this.onLocate,
     required this.onRetry,
   });
 
@@ -537,27 +532,34 @@ class MapView extends StatelessWidget {
   final bool isLoading;
   final String? errorMessage;
   final VoidCallback onPinTap;
+  final VoidCallback onLocate;
   final VoidCallback onRetry;
 
   @override
   Widget build(BuildContext context) {
-    final visiblePins = math.min(menus.length, 5);
+    final mapMarkers = menus
+        .where((menu) => menu.latitude != 0 && menu.longitude != 0)
+        .take(20)
+        .map(
+          (menu) => MapMarker(
+            id: menu.menuId,
+            title: menu.menuName,
+            latitude: menu.latitude,
+            longitude: menu.longitude,
+            onTap: onPinTap,
+          ),
+        )
+        .toList();
 
     return Stack(
       fit: StackFit.expand,
       children: <Widget>[
-        KakaoMapCanvas(
-          nativeKey: _kakaoMapKey,
-          javaScriptKey: _kakaoJavaScriptKey,
+        OsmMapCanvas(
           latitude: latitude,
           longitude: longitude,
+          radiusMeters: radiusMeters,
+          markers: mapMarkers,
         ),
-        for (int i = 0; i < visiblePins; i++)
-          _MapPin(
-            menu: menus[i],
-            position: _pinPosition(i),
-            onTap: onPinTap,
-          ),
         if (isLoading)
           const Center(child: CircularProgressIndicator())
         else if (menus.isEmpty)
@@ -569,6 +571,21 @@ class MapView extends StatelessWidget {
               onRetry: onRetry,
             ),
           ),
+        Positioned(
+          left: 16,
+          bottom: 16,
+          child: Material(
+            color: AppColors.background,
+            borderRadius: BorderRadius.circular(8),
+            elevation: 6,
+            shadowColor: const Color(0x26000000),
+            child: IconButton(
+              tooltip: '현재 위치로 이동',
+              onPressed: isLoading ? null : onLocate,
+              icon: const Icon(Icons.my_location, color: AppColors.foreground),
+            ),
+          ),
+        ),
         Positioned(
           right: 16,
           bottom: 16,
@@ -592,63 +609,6 @@ class MapView extends StatelessWidget {
           ),
         ),
       ],
-    );
-  }
-}
-
-class _MapPin extends StatelessWidget {
-  const _MapPin({required this.menu, required this.position, required this.onTap});
-
-  final MenuSummary menu;
-  final Offset position;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return Positioned(
-      left: position.dx,
-      top: position.dy,
-      child: FractionalTranslation(
-        translation: const Offset(-0.5, -1),
-        child: GestureDetector(
-          onTap: onTap,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: <Widget>[
-              Container(
-                padding: const EdgeInsets.all(8),
-                decoration: const BoxDecoration(
-                  color: AppColors.destructive,
-                  shape: BoxShape.circle,
-                  boxShadow: <BoxShadow>[
-                    BoxShadow(color: Color(0x33000000), blurRadius: 12, offset: Offset(0, 5)),
-                  ],
-                ),
-                child: const Icon(Icons.location_pin, color: Colors.white, size: 20),
-              ),
-              const SizedBox(height: 4),
-              Container(
-                constraints: const BoxConstraints(maxWidth: 120),
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-                decoration: BoxDecoration(
-                  color: AppColors.background,
-                  borderRadius: BorderRadius.circular(5),
-                  border: Border.all(color: AppColors.border),
-                  boxShadow: const <BoxShadow>[
-                    BoxShadow(color: Color(0x17000000), blurRadius: 8, offset: Offset(0, 3)),
-                  ],
-                ),
-                child: Text(
-                  menu.menuName,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 12),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
     );
   }
 }
@@ -1360,17 +1320,6 @@ class CoreInfo {
       downvotes: _asInt(json['downvotes'] ?? 0),
     );
   }
-}
-
-Offset _pinPosition(int index) {
-  const positions = <Offset>[
-    Offset(130, 210),
-    Offset(260, 155),
-    Offset(190, 305),
-    Offset(315, 250),
-    Offset(95, 360),
-  ];
-  return positions[index % positions.length];
 }
 
 String _radiusLabel(int meters) {
