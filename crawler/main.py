@@ -7,6 +7,7 @@ AI 가공 없이 DB(menu_wise.db)에 그대로 저장한다.
 메뉴 추출/매칭/핵심정보 생성은 2단계(ai_engine/enrich_db.py)에서 수행한다.
 """
 
+import argparse
 import hashlib
 import os
 import re
@@ -17,6 +18,7 @@ from database_and_crawler import MenuWiseDB
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 AI_CRAWL_INPUT_FILE = Path(__file__).with_name("ai_crawl_input.txt")
+AI_CRAWL_INPUT_EXTRA_FILE = Path(__file__).with_name("ai_crawl_input_extra.txt")
 
 
 def _db_path():
@@ -162,8 +164,37 @@ def load_ai_crawl_input_to_db(path=AI_CRAWL_INPUT_FILE):
     return restaurants
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Load MenuWise ai_crawl_input txt files into menu_wise.db."
+    )
+    parser.add_argument(
+        "--input",
+        default=str(AI_CRAWL_INPUT_FILE),
+        help="Path to one ai_crawl_input-compatible txt file.",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Load both ai_crawl_input.txt and ai_crawl_input_extra.txt if they exist.",
+    )
+    return parser.parse_args()
+
+
 def main():
-    load_ai_crawl_input_to_db()
+    args = parse_args()
+
+    if args.all:
+        for path in (AI_CRAWL_INPUT_FILE, AI_CRAWL_INPUT_EXTRA_FILE):
+            if not path.exists():
+                print(f"{path} 파일을 찾을 수 없습니다. 건너뜁니다.")
+                continue
+
+            print(f"\n=== Loading {path} ===")
+            load_ai_crawl_input_to_db(path)
+        return
+
+    load_ai_crawl_input_to_db(args.input)
 
 
 if __name__ == "__main__":
