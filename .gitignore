@@ -32,8 +32,6 @@ menu_wise.db
 crawler/*_preview.txt
 crawler/*_candidates.txt
 crawler/apify_*.json
-# 크롤러 입력 데이터(식당/리뷰 원문) — 저장소에서 제외 (추적 해제 처리됨)
-crawler/ai_crawl_input*.txt
 
 # ===== Flutter 빌드/도구 산출물 =====
 # (frontend/.gitignore가 처리하지만 루트에서도 방어적으로 무시)
