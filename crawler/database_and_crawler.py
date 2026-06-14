@@ -684,10 +684,16 @@ class MenuWiseDB:
         return results
 
     def get_restaurants_with_menus(self, lat=None, lng=None, radius_km=None, keyword=None):
-        """메뉴가 있는 모든 식당을 반환한다(지도 핀용). keyword가 있으면 식당명/카테고리로 거른다."""
+        """메뉴가 있는 모든 식당을 반환한다(지도 핀용).
+
+        keyword가 있으면 식당명/카테고리뿐 아니라 그 식당의 메뉴명에 검색어가
+        포함돼도 노출한다(예: '탕수육'으로 검색 시 탕수육을 파는 식당도 표시).
+        """
         cursor = self.conn.cursor()
         cursor.execute("""
-            SELECT r.res_id, r.res_name, r.lat, r.lng, r.category, COUNT(m.menu_id) AS menu_count
+            SELECT r.res_id, r.res_name, r.lat, r.lng, r.category,
+                   COUNT(m.menu_id) AS menu_count,
+                   GROUP_CONCAT(m.menu_name, ' ') AS menu_names
             FROM restaurants r
             JOIN menus m ON r.res_id = m.res_id
             GROUP BY r.res_id
@@ -696,7 +702,7 @@ class MenuWiseDB:
 
         keyword = (keyword or "").strip().lower()
         results = []
-        for res_id, res_name, res_lat, res_lng, category, menu_count in rows:
+        for res_id, res_name, res_lat, res_lng, category, menu_count, menu_names in rows:
             distance_km = 0.0
             if lat is not None and lng is not None:
                 distance_km = self._calculate_distance(lat, lng, res_lat, res_lng)
@@ -704,7 +710,8 @@ class MenuWiseDB:
                     continue
 
             if keyword:
-                haystack = f"{res_name or ''} {category or ''}".lower()
+                # 식당명·카테고리 + 메뉴명까지 검색 대상에 포함
+                haystack = f"{res_name or ''} {category or ''} {menu_names or ''}".lower()
                 if keyword not in haystack:
                     continue
 

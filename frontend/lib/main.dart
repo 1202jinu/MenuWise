@@ -202,6 +202,12 @@ class _MenuWiseHomePageState extends State<MenuWiseHomePage> {
       if (!mounted) return;
       setState(() {
         _sheetMenus = results;
+        // 검색된 메뉴를 파는 식당들의 핀을 지도에 표시(음식점검색과 동일하게)
+        _restaurants = _pinsFromMenuResults(results);
+        if (results.isNotEmpty) {
+          _camLat = results.first.latitude;
+          _camLng = results.first.longitude;
+        }
         _sheetIsSearch = true;
         _sheetTitle = _searchMode == SearchMode.menu
             ? (query.isEmpty ? '메뉴 검색' : "'$query' 비교")
@@ -218,6 +224,25 @@ class _MenuWiseHomePageState extends State<MenuWiseHomePage> {
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
+  }
+
+  // 메뉴/키워드 검색 결과 → 식당 핀 목록(식당 중복 제거, 매칭 메뉴 수 집계)
+  List<RestaurantPin> _pinsFromMenuResults(List<MenuSummary> menus) {
+    final pins = <String, RestaurantPin>{};
+    final counts = <String, int>{};
+    for (final menu in menus) {
+      if (menu.resId.isEmpty || menu.latitude == 0 || menu.longitude == 0) continue;
+      counts[menu.resId] = (counts[menu.resId] ?? 0) + 1;
+      pins[menu.resId] = RestaurantPin(
+        resId: menu.resId,
+        name: menu.restaurantName.isEmpty ? menu.menuName : menu.restaurantName,
+        latitude: menu.latitude,
+        longitude: menu.longitude,
+        category: '',
+        menuCount: counts[menu.resId]!,
+      );
+    }
+    return pins.values.toList();
   }
 
   void _setSearchMode(SearchMode mode) {
