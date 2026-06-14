@@ -29,10 +29,11 @@ menu_wise.db
 # ===== 크롤러 산출물(파이프라인 미사용 덤프 — 일부는 키 포함 가능) =====
 # 사진 URL 쿼리스트링에 실제 Google API 키가 섞일 수 있어 패턴으로 차단.
 # (해당 덤프 파일들은 삭제했으나 재생성 대비 패턴으로 계속 무시한다.)
-# crawler/ai_crawl_input*.txt 입력 데이터는 키가 없어 커밋 대상으로 유지.
 crawler/*_preview.txt
 crawler/*_candidates.txt
 crawler/apify_*.json
+# 크롤러 입력 데이터(식당/리뷰 원문) — 저장소에서 제외 (추적 해제 처리됨)
+crawler/ai_crawl_input*.txt
 
 # ===== Flutter 빌드/도구 산출물 =====
 # (frontend/.gitignore가 처리하지만 루트에서도 방어적으로 무시)
@@ -74,3 +75,7 @@ keystore.properties
 # Firebase / Google 서비스 설정(프로젝트 키 포함될 수 있음)
 **/google-services.json
 **/GoogleService-Info.plist
+
+# ===== 발표/문서 자산 (코드 아님) =====
+architecture_diagram.png
+architecture_diagram.html
