@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 import 'package:pointer_interceptor/pointer_interceptor.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:menu_wise/osm_map_canvas.dart';
 
@@ -52,13 +53,13 @@ class _MenuWiseHomePageState extends State<MenuWiseHomePage> {
   final Set<String> _selectedKeywords = <String>{};
 
   static const List<TasteKeyword> _keywords = <TasteKeyword>[
-    TasteKeyword('sweet', '달콤', '🍯'),
-    TasteKeyword('spicy', '매콤', '🌶️'),
-    TasteKeyword('sour', '새콤', '🍋'),
-    TasteKeyword('crispy', '바삭', '✨'),
-    TasteKeyword('soft', '부드러', '🥚'),
-    TasteKeyword('savory', '구수', '🍜'),
-    TasteKeyword('value', '가성비', '💰'),
+    TasteKeyword('sweet', '달콤', '달콤한', '🍯'),
+    TasteKeyword('spicy', '매콤', '매콤한', '🌶️'),
+    TasteKeyword('sour', '새콤', '새콤한', '🍋'),
+    TasteKeyword('crispy', '바삭', '바삭한', '✨'),
+    TasteKeyword('soft', '부드러', '부드러운', '🥚'),
+    TasteKeyword('savory', '구수', '구수한', '🍜'),
+    TasteKeyword('value', '가성비', '가성비', '💰'),
   ];
 
   double _userLat = 37.8615;
@@ -168,11 +169,17 @@ class _MenuWiseHomePageState extends State<MenuWiseHomePage> {
       return;
     }
 
-    if (_searchMode == SearchMode.keyword && _selectedKeywords.isEmpty) {
+    // 키워드 모드: 상단에서 선택한 키워드 + 입력칸에 직접 친 키워드를 함께 사용
+    final keywordSet = <String>{..._selectedKeywords};
+    if (_searchMode == SearchMode.keyword && query.isNotEmpty) {
+      keywordSet.add(query);
+    }
+
+    if (_searchMode == SearchMode.keyword && keywordSet.isEmpty) {
       setState(() {
         _sheetMenus = <MenuSummary>[];
         _sheetOpen = false;
-        _errorMessage = '상단 키워드를 한 개 이상 선택해 주세요.';
+        _errorMessage = '검색할 키워드를 입력하거나 상단에서 선택해 주세요.';
       });
       return;
     }
@@ -189,7 +196,7 @@ class _MenuWiseHomePageState extends State<MenuWiseHomePage> {
         query: _searchMode == SearchMode.menu ? query : '',
         mode: _searchMode,
         keywords: _searchMode == SearchMode.keyword
-            ? (_selectedKeywords.toList()..sort())
+            ? (keywordSet.toList()..sort())
             : <String>[],
       );
       if (!mounted) return;
@@ -422,7 +429,7 @@ class FigmaSearchBar extends StatelessWidget {
       case SearchMode.menu:
         return '메뉴 이름 검색 (예: 국수)';
       case SearchMode.keyword:
-        return '상단 키워드를 선택하세요';
+        return '키워드로 검색 (예: 매콤)';
     }
   }
 
@@ -451,7 +458,6 @@ class FigmaSearchBar extends StatelessWidget {
                     child: TextField(
                       controller: controller,
                       textInputAction: TextInputAction.search,
-                      enabled: searchMode != SearchMode.keyword,
                       onSubmitted: (_) => onSearch(),
                       decoration: InputDecoration(
                         icon: const Icon(Icons.search, color: AppColors.mutedForeground),
@@ -593,7 +599,7 @@ class KeywordChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Tooltip(
-      message: keyword.label,
+      message: keyword.display,
       child: Material(
         color: selected ? AppColors.accent : AppColors.secondary,
         borderRadius: BorderRadius.circular(999),
@@ -629,7 +635,7 @@ class KeywordChip extends StatelessWidget {
                 const SizedBox(width: 8),
                 Flexible(
                   child: Text(
-                    keyword.label,
+                    keyword.display,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     strutStyle: const StrutStyle(
@@ -926,13 +932,62 @@ class MenuDetailPage extends StatefulWidget {
 }
 
 class _MenuDetailPageState extends State<MenuDetailPage> {
-  late Future<List<CoreInfo>> _details;
+  List<CoreInfo> _items = <CoreInfo>[];
+  bool _loading = true;
+  bool _hasError = false;
   DetailTab _activeTab = DetailTab.positive;
 
   @override
   void initState() {
     super.initState();
-    _details = widget.api.fetchMenuDetails(widget.menu.menuId);
+    _loadDetails();
+  }
+
+  // 상세를 불러온 뒤, 이 기기에서 이미 누른 추천/비추천 상태를 복원한다.
+  Future<void> _loadDetails() async {
+    try {
+      final details = await widget.api.fetchMenuDetails(widget.menu.menuId);
+      for (final info in details) {
+        info.userVote = await VoteStore.get(info.infoId);
+      }
+      _sortByNetVotes(details);
+      if (!mounted) return;
+      setState(() {
+        _items = details;
+        _loading = false;
+      });
+      _syncRepresentative();
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _hasError = true;
+        _loading = false;
+      });
+    }
+  }
+
+  // 서버 대표 장단점과 동일한 기준: (추천-비추천) 내림차순, level 오름차순, info_id 오름차순.
+  void _sortByNetVotes(List<CoreInfo> list) {
+    list.sort((a, b) {
+      final netA = a.upvotes - a.downvotes;
+      final netB = b.upvotes - b.downvotes;
+      if (netA != netB) return netB.compareTo(netA);
+      if (a.level != b.level) return a.level.compareTo(b.level);
+      return a.infoId.compareTo(b.infoId);
+    });
+  }
+
+  // 정렬된 목록의 맨 위 PROS/CONS를 대표로 삼아 메뉴 요약(목록 미리보기)에 즉시 반영한다.
+  void _syncRepresentative() {
+    String pros = '';
+    String cons = '';
+    for (final info in _items) {
+      if (info.infoType == 'PROS' && pros.isEmpty) pros = info.content;
+      if (info.infoType == 'CONS' && cons.isEmpty) cons = info.content;
+      if (pros.isNotEmpty && cons.isNotEmpty) break;
+    }
+    widget.menu.corePros = pros;
+    widget.menu.coreCons = cons;
   }
 
   void _applyVoteCounts(CoreInfo info, String from, String to) {
@@ -953,15 +1008,25 @@ class _MenuDetailPageState extends State<MenuDetailPage> {
     final previous = info.userVote;
     final next = previous == target ? 'none' : target; // 같은 버튼 두 번 → 취소
 
-    setState(() => _applyVoteCounts(info, previous, next)); // 낙관적 업데이트
+    // 낙관적 업데이트: 표 반영 → 재정렬 → 대표 갱신을 즉시 화면에 적용한다.
+    setState(() {
+      _applyVoteCounts(info, previous, next);
+      _sortByNetVotes(_items);
+    });
+    _syncRepresentative();
 
     try {
       await widget.api.vote(infoId: info.infoId, vote: next, previous: previous);
+      await VoteStore.set(info.infoId, next); // 기기에 영속 저장 → 재방문 시 재투표 방지
     } catch (_) {
       if (!mounted) {
         return;
       }
-      setState(() => _applyVoteCounts(info, next, previous)); // 실패 시 롤백
+      setState(() {
+        _applyVoteCounts(info, next, previous); // 실패 시 롤백
+        _sortByNetVotes(_items);
+      });
+      _syncRepresentative();
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('투표를 저장하지 못했습니다. 서버 상태를 확인해 주세요.')),
       );
@@ -1020,61 +1085,218 @@ class _MenuDetailPageState extends State<MenuDetailPage> {
               ),
             ],
           ),
-          Expanded(
-            child: FutureBuilder<List<CoreInfo>>(
-              future: _details,
-              builder: (context, snapshot) {
-                if (snapshot.connectionState == ConnectionState.waiting) {
-                  return const Center(child: CircularProgressIndicator());
-                }
-                if (snapshot.hasError) {
-                  return const Center(child: Text('상세 리뷰를 불러오지 못했습니다.'));
-                }
-
-                final details = (snapshot.data ?? <CoreInfo>[])
-                    .where((item) => _activeTab == DetailTab.positive ? item.infoType == 'PROS' : item.infoType == 'CONS')
-                    .toList();
-
-                if (details.isEmpty) {
-                  return const Center(child: Text('아직 상세 리뷰 요약이 없습니다.'));
-                }
-
-                return ListView.separated(
-                  padding: const EdgeInsets.all(16),
-                  itemBuilder: (context, index) {
-                    final info = details[index];
-                    return ReviewCard(
-                      info: info,
-                      onLike: () => _vote(info, 'up'),
-                      onDislike: () => _vote(info, 'down'),
-                    );
-                  },
-                  separatorBuilder: (context, index) => const SizedBox(height: 14),
-                  itemCount: details.length,
-                );
-              },
-            ),
-          ),
+          Expanded(child: _buildDetailBody()),
         ],
       ),
     );
   }
+
+  Widget _buildDetailBody() {
+    if (_loading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (_hasError) {
+      return const Center(child: Text('상세 리뷰를 불러오지 못했습니다.'));
+    }
+
+    final details = _items
+        .where((item) => _activeTab == DetailTab.positive ? item.infoType == 'PROS' : item.infoType == 'CONS')
+        .toList();
+
+    if (details.isEmpty) {
+      return Center(
+        child: Text(
+          _activeTab == DetailTab.negative ? '단점에 대한 리뷰가 없습니다.' : '장점에 대한 리뷰가 없습니다.',
+          style: const TextStyle(color: AppColors.mutedForeground),
+        ),
+      );
+    }
+
+    return ListView.separated(
+      padding: const EdgeInsets.all(16),
+      itemBuilder: (context, index) {
+        final info = details[index];
+        return ReviewCard(
+          key: ValueKey<int>(info.infoId),
+          info: info,
+          api: widget.api,
+          onLike: () => _vote(info, 'up'),
+          onDislike: () => _vote(info, 'down'),
+        );
+      },
+      separatorBuilder: (context, index) => const SizedBox(height: 14),
+      itemCount: details.length,
+    );
+  }
 }
 
-class ReviewCard extends StatelessWidget {
+class ReviewCard extends StatefulWidget {
   const ReviewCard({
     super.key,
     required this.info,
+    required this.api,
     required this.onLike,
     required this.onDislike,
   });
 
   final CoreInfo info;
+  final ApiClient api;
   final VoidCallback onLike;
   final VoidCallback onDislike;
 
   @override
+  State<ReviewCard> createState() => _ReviewCardState();
+}
+
+class _ReviewCardState extends State<ReviewCard> {
+  final TextEditingController _commentController = TextEditingController();
+  final TextEditingController _editController = TextEditingController();
+  bool _expanded = false;
+  bool _loading = false;
+  bool _submitting = false;
+  String _token = '';
+  int? _editingId; // 현재 인라인 수정 중인 댓글 id (없으면 null)
+  bool _savingEdit = false;
+  List<MenuComment> _comments = <MenuComment>[];
+
+  @override
+  void initState() {
+    super.initState();
+    CommentIdentity.token().then((value) {
+      if (mounted) setState(() => _token = value);
+    });
+  }
+
+  @override
+  void dispose() {
+    _commentController.dispose();
+    _editController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _toggleComments() async {
+    setState(() => _expanded = !_expanded);
+    if (_expanded) {
+      await _loadComments();
+    }
+  }
+
+  Future<void> _loadComments() async {
+    setState(() => _loading = true);
+    try {
+      if (_token.isEmpty) {
+        _token = await CommentIdentity.token();
+      }
+      final comments = await widget.api.fetchComments(widget.info.infoId, token: _token);
+      if (!mounted) return;
+      setState(() {
+        _comments = comments;
+        widget.info.commentCount = comments.length;
+      });
+    } catch (_) {
+      // 조회 실패 시 목록은 그대로 둔다.
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _submitComment() async {
+    final text = _commentController.text.trim();
+    if (text.isEmpty || _submitting) return;
+
+    setState(() => _submitting = true);
+    try {
+      if (_token.isEmpty) {
+        _token = await CommentIdentity.token();
+      }
+      final created = await widget.api.addComment(widget.info.infoId, text, token: _token);
+      if (!mounted) return;
+      setState(() {
+        _comments = <MenuComment>[..._comments, created];
+        widget.info.commentCount = _comments.length;
+        _commentController.clear();
+      });
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('댓글을 저장하지 못했습니다. 서버 상태를 확인해 주세요.')),
+      );
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
+  }
+
+  void _startEdit(MenuComment comment) {
+    setState(() {
+      _editingId = comment.commentId;
+      _editController.text = comment.content;
+    });
+  }
+
+  void _cancelEdit() {
+    setState(() => _editingId = null);
+  }
+
+  Future<void> _saveEdit(MenuComment comment) async {
+    final text = _editController.text.trim();
+    if (text.isEmpty || _savingEdit) return;
+
+    setState(() => _savingEdit = true);
+    try {
+      final updated = await widget.api.updateComment(comment.commentId, text, _token);
+      if (!mounted) return;
+      setState(() {
+        _comments = _comments
+            .map((c) => c.commentId == comment.commentId ? c.copyWith(content: updated.content) : c)
+            .toList();
+        _editingId = null;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('댓글을 수정하지 못했습니다. 서버 상태를 확인해 주세요.')),
+      );
+    } finally {
+      if (mounted) setState(() => _savingEdit = false);
+    }
+  }
+
+  Future<void> _deleteComment(MenuComment comment) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('댓글 삭제'),
+        content: const Text('이 댓글을 삭제할까요?'),
+        actions: <Widget>[
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('취소')),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('삭제', style: TextStyle(color: AppColors.destructive)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    try {
+      await widget.api.deleteComment(comment.commentId, _token);
+      if (!mounted) return;
+      setState(() {
+        _comments = _comments.where((c) => c.commentId != comment.commentId).toList();
+        widget.info.commentCount = _comments.length;
+        if (_editingId == comment.commentId) _editingId = null;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('댓글을 삭제하지 못했습니다. 서버 상태를 확인해 주세요.')),
+      );
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final info = widget.info;
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
@@ -1093,7 +1315,7 @@ class ReviewCard extends StatelessWidget {
                 count: info.upvotes,
                 selected: info.userVote == 'up',
                 selectedColor: AppColors.primary,
-                onTap: onLike,
+                onTap: widget.onLike,
               ),
               const SizedBox(width: 10),
               CountButton(
@@ -1101,13 +1323,204 @@ class ReviewCard extends StatelessWidget {
                 count: info.downvotes,
                 selected: info.userVote == 'down',
                 selectedColor: AppColors.destructive,
-                onTap: onDislike,
+                onTap: widget.onDislike,
               ),
               const SizedBox(width: 10),
-              CountButton(icon: Icons.mode_comment_outlined, count: 0, onTap: () {}),
+              CountButton(
+                icon: _expanded ? Icons.mode_comment : Icons.mode_comment_outlined,
+                count: info.commentCount,
+                selected: _expanded,
+                selectedColor: AppColors.foreground,
+                onTap: _toggleComments,
+              ),
+            ],
+          ),
+          if (_expanded) _buildCommentSection(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCommentSection() {
+    return Padding(
+      padding: const EdgeInsets.only(top: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          const Divider(height: 1, color: AppColors.border),
+          const SizedBox(height: 10),
+          if (_loading)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 8),
+              child: SizedBox(height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2)),
+            )
+          else if (_comments.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 6),
+              child: Text(
+                '아직 댓글이 없습니다. 첫 댓글을 남겨보세요.',
+                style: TextStyle(fontSize: 12, color: AppColors.mutedForeground),
+              ),
+            )
+          else
+            ..._comments.map(_buildCommentTile),
+          const SizedBox(height: 4),
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: AppColors.background,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: AppColors.border),
+                  ),
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  child: TextField(
+                    controller: _commentController,
+                    textInputAction: TextInputAction.send,
+                    onSubmitted: (_) => _submitComment(),
+                    decoration: const InputDecoration(
+                      hintText: '댓글 남기기 (추가 정보·정정 등)',
+                      border: InputBorder.none,
+                      isCollapsed: true,
+                      contentPadding: EdgeInsets.symmetric(vertical: 12),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Material(
+                color: AppColors.primary,
+                borderRadius: BorderRadius.circular(8),
+                child: IconButton(
+                  tooltip: '댓글 등록',
+                  onPressed: _submitting ? null : _submitComment,
+                  icon: _submitting
+                      ? const SizedBox.square(
+                          dimension: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                        )
+                      : const Icon(Icons.send, size: 18, color: Colors.white),
+                ),
+              ),
             ],
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildCommentTile(MenuComment comment) {
+    final editing = _editingId == comment.commentId;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: AppColors.background,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: editing ? _buildCommentEditor(comment) : _buildCommentContent(comment),
+      ),
+    );
+  }
+
+  Widget _buildCommentContent(MenuComment comment) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        Expanded(
+          child: Text(comment.content, style: const TextStyle(fontSize: 13, height: 1.35)),
+        ),
+        if (comment.isMine) ...<Widget>[
+          const SizedBox(width: 6),
+          _CommentAction(
+            icon: Icons.edit_outlined,
+            tooltip: '수정',
+            onTap: () => _startEdit(comment),
+          ),
+          _CommentAction(
+            icon: Icons.delete_outline,
+            tooltip: '삭제',
+            color: AppColors.destructive,
+            onTap: () => _deleteComment(comment),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildCommentEditor(MenuComment comment) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: <Widget>[
+        TextField(
+          controller: _editController,
+          autofocus: true,
+          textInputAction: TextInputAction.send,
+          onSubmitted: (_) => _saveEdit(comment),
+          style: const TextStyle(fontSize: 13, height: 1.35),
+          decoration: const InputDecoration(
+            isCollapsed: true,
+            border: InputBorder.none,
+            contentPadding: EdgeInsets.symmetric(vertical: 4),
+          ),
+        ),
+        const SizedBox(height: 4),
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            TextButton(
+              onPressed: _savingEdit ? null : _cancelEdit,
+              style: TextButton.styleFrom(
+                minimumSize: const Size(0, 32),
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+              ),
+              child: const Text('취소', style: TextStyle(fontSize: 12, color: AppColors.mutedForeground)),
+            ),
+            TextButton(
+              onPressed: _savingEdit ? null : () => _saveEdit(comment),
+              style: TextButton.styleFrom(
+                minimumSize: const Size(0, 32),
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+              ),
+              child: _savingEdit
+                  ? const SizedBox.square(dimension: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Text('저장', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.primary)),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+class _CommentAction extends StatelessWidget {
+  const _CommentAction({
+    required this.icon,
+    required this.tooltip,
+    required this.onTap,
+    this.color = AppColors.mutedForeground,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback onTap;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(999),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(4),
+          child: Icon(icon, size: 16, color: color),
+        ),
       ),
     );
   }
@@ -1245,7 +1658,7 @@ class ReviewLine extends StatelessWidget {
         const SizedBox(width: 8),
         Expanded(
           child: Text(
-            text.isEmpty ? '리뷰 요약 준비 중' : text,
+            text.isEmpty ? '관련 리뷰 없음' : text,
             maxLines: 2,
             overflow: TextOverflow.ellipsis,
             style: const TextStyle(fontSize: 12, color: AppColors.mutedForeground, height: 1.3),
@@ -1355,10 +1768,11 @@ enum SearchMode {
 }
 
 class TasteKeyword {
-  const TasteKeyword(this.id, this.label, this.emoji);
+  const TasteKeyword(this.id, this.label, this.display, this.emoji);
 
   final String id;
-  final String label;
+  final String label; // 실제 검색/매칭에 쓰는 어간 (예: 매콤)
+  final String display; // 배너에 보이는 글씨 (예: 매콤한)
   final String emoji;
 }
 
@@ -1492,6 +1906,66 @@ class ApiClient {
     }
   }
 
+  Future<List<MenuComment>> fetchComments(int infoId, {String token = ''}) async {
+    final uri = Uri.parse('$baseUrl/api/info/$infoId/comments').replace(
+      queryParameters: <String, String>{
+        if (token.isNotEmpty) 'author_token': token,
+      },
+    );
+    final json = await _getJson(uri);
+    final raw = json is Map<String, dynamic> ? json['comments'] : json;
+    if (raw is! List) {
+      return <MenuComment>[];
+    }
+    return raw.whereType<Map<String, dynamic>>().map(MenuComment.fromJson).toList();
+  }
+
+  Future<MenuComment> addComment(int infoId, String content, {String token = ''}) async {
+    final uri = Uri.parse('$baseUrl/api/info/$infoId/comments');
+    final response = await http.post(
+      uri,
+      headers: const <String, String>{
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode(<String, dynamic>{'content': content, 'author_token': token}),
+    ).timeout(const Duration(seconds: 4));
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception('Comment failed: ${response.statusCode} ${response.body}');
+    }
+    final json = jsonDecode(utf8.decode(response.bodyBytes));
+    final raw = json is Map<String, dynamic> ? json['comment'] : json;
+    return MenuComment.fromJson(raw as Map<String, dynamic>);
+  }
+
+  Future<MenuComment> updateComment(int commentId, String content, String token) async {
+    final uri = Uri.parse('$baseUrl/api/comments/$commentId');
+    final response = await http.put(
+      uri,
+      headers: const <String, String>{
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode(<String, dynamic>{'content': content, 'author_token': token}),
+    ).timeout(const Duration(seconds: 4));
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception('Comment update failed: ${response.statusCode} ${response.body}');
+    }
+    final json = jsonDecode(utf8.decode(response.bodyBytes));
+    final raw = json is Map<String, dynamic> ? json['comment'] : json;
+    return MenuComment.fromJson(raw as Map<String, dynamic>);
+  }
+
+  Future<void> deleteComment(int commentId, String token) async {
+    final uri = Uri.parse('$baseUrl/api/comments/$commentId').replace(
+      queryParameters: <String, String>{'author_token': token},
+    );
+    final response = await http.delete(uri).timeout(const Duration(seconds: 4));
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception('Comment delete failed: ${response.statusCode} ${response.body}');
+    }
+  }
+
   Future<dynamic> _getJson(Uri uri) async {
     final response = await http.get(uri).timeout(const Duration(seconds: 4));
     if (response.statusCode < 200 || response.statusCode >= 300) {
@@ -1505,7 +1979,7 @@ class ApiClient {
 }
 
 class MenuSummary {
-  const MenuSummary({
+  MenuSummary({
     required this.menuId,
     required this.resId,
     required this.restaurantName,
@@ -1526,8 +2000,10 @@ class MenuSummary {
   final double latitude;
   final double longitude;
   final String photoUrl;
-  final String corePros;
-  final String coreCons;
+  // 대표 장/단점: 상세 화면에서 투표로 (추천-비추천) 순위가 바뀌면 즉시 갱신되어
+  // 목록 미리보기에도 새로고침 없이 반영된다.
+  String corePros;
+  String coreCons;
 
   String get priceLabel {
     if (price <= 0) {
@@ -1564,6 +2040,7 @@ class CoreInfo {
     required this.level,
     required this.upvotes,
     required this.downvotes,
+    this.commentCount = 0,
   });
 
   final int infoId;
@@ -1572,6 +2049,7 @@ class CoreInfo {
   final int level;
   int upvotes;
   int downvotes;
+  int commentCount;
 
   // 이 기기에서 누른 투표 상태: 'none' | 'up' | 'down' (두 번 누르면 취소)
   String userVote = 'none';
@@ -1584,7 +2062,101 @@ class CoreInfo {
       level: _asInt(json['level'] ?? 0),
       upvotes: _asInt(json['upvotes'] ?? 0),
       downvotes: _asInt(json['downvotes'] ?? 0),
+      commentCount: _asInt(json['comment_count'] ?? 0),
     );
+  }
+}
+
+class MenuComment {
+  const MenuComment({
+    required this.commentId,
+    required this.content,
+    required this.createdAt,
+    this.isMine = false,
+  });
+
+  final int commentId;
+  final String content;
+  final String createdAt;
+  final bool isMine; // 이 기기(작성자)가 단 댓글이면 true → 수정/삭제 버튼 노출
+
+  MenuComment copyWith({String? content}) {
+    return MenuComment(
+      commentId: commentId,
+      content: content ?? this.content,
+      createdAt: createdAt,
+      isMine: isMine,
+    );
+  }
+
+  factory MenuComment.fromJson(Map<String, dynamic> json) {
+    return MenuComment(
+      commentId: _asInt(json['comment_id'] ?? 0),
+      content: '${json['content'] ?? ''}',
+      createdAt: '${json['created_at'] ?? ''}',
+      isMine: json['is_mine'] == true,
+    );
+  }
+}
+
+/// 기기별 익명 작성자 토큰을 영속 저장한다. 서버는 이 토큰으로 작성자를 식별해
+/// 본인 댓글만 수정/삭제하도록 검증한다. (웹에서는 localStorage에 저장됨)
+class CommentIdentity {
+  static const String _key = 'menuwise_comment_token';
+  static String? _cache;
+
+  static Future<String> token() async {
+    if (_cache != null) return _cache!;
+    final prefs = await SharedPreferences.getInstance();
+    var token = prefs.getString(_key);
+    if (token == null || token.isEmpty) {
+      final now = DateTime.now().microsecondsSinceEpoch;
+      final rand = Object().hashCode ^ now.hashCode;
+      token = 'u_${now.toRadixString(16)}${rand.toRadixString(16)}';
+      await prefs.setString(_key, token);
+    }
+    _cache = token;
+    return token;
+  }
+}
+
+/// 기기별 추천/비추천 상태를 영속 저장해 앱을 나갔다 와도 재투표(무한 증가)를 막는다.
+/// (웹에서는 localStorage에 저장됨)
+class VoteStore {
+  static const String _key = 'menuwise_votes';
+  static Map<String, String>? _cache;
+
+  static Future<Map<String, String>> _load() async {
+    if (_cache != null) return _cache!;
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_key);
+    if (raw == null || raw.isEmpty) {
+      _cache = <String, String>{};
+    } else {
+      try {
+        final decoded = jsonDecode(raw) as Map<String, dynamic>;
+        _cache = decoded.map((k, v) => MapEntry(k, '$v'));
+      } catch (_) {
+        _cache = <String, String>{};
+      }
+    }
+    return _cache!;
+  }
+
+  static Future<String> get(int infoId) async {
+    final map = await _load();
+    return map['$infoId'] ?? 'none';
+  }
+
+  static Future<void> set(int infoId, String vote) async {
+    final map = await _load();
+    if (vote == 'none') {
+      map.remove('$infoId');
+    } else {
+      map['$infoId'] = vote;
+    }
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_key, jsonEncode(map));
   }
 }
 

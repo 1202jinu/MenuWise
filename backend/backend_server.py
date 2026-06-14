@@ -141,6 +141,16 @@ class VoteRequest(BaseModel):
     previous: str = "none"  # 'up' | 'down' | 'none' (직전 상태, 취소/전환 계산용)
 
 
+class CommentRequest(BaseModel):
+    content: str
+    author_token: Optional[str] = None
+
+
+class CommentUpdateRequest(BaseModel):
+    content: str
+    author_token: str
+
+
 def _require_db():
     if db is None:
         detail = "DB가 초기화되지 않았습니다."
@@ -521,3 +531,90 @@ async def vote(request: VoteRequest):
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"투표 처리 중 오류 발생: {exc}") from exc
+
+
+@app.get(
+    "/api/info/{info_id}/comments",
+    summary="장단점 댓글 조회",
+    description="해당 핵심 정보(info_id)에 달린 댓글 목록을 반환합니다. author_token이 작성자와 일치하면 is_mine=True로 표시합니다.",
+)
+async def get_info_comments(info_id: int, author_token: Optional[str] = None):
+    if USE_DUMMY:
+        return {"comments": []}
+
+    database = _require_db()
+    try:
+        return {"comments": database.get_comments(info_id, viewer_token=author_token)}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"댓글 조회 중 오류 발생: {exc}") from exc
+
+
+@app.post(
+    "/api/info/{info_id}/comments",
+    summary="장단점 댓글 작성",
+    description="해당 핵심 정보(info_id)에 댓글을 추가합니다.",
+)
+async def add_info_comment(info_id: int, request: CommentRequest):
+    content = (request.content or "").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="댓글 내용이 비어 있습니다.")
+
+    if USE_DUMMY:
+        return {"comment": {"comment_id": 0, "info_id": info_id, "content": content, "created_at": "", "is_mine": True}}
+
+    database = _require_db()
+    try:
+        comment = database.add_comment(info_id, content, author_token=request.author_token)
+        if comment is None:
+            raise HTTPException(status_code=404, detail=f"info_id {info_id}를 찾을 수 없습니다.")
+        return {"comment": comment}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"댓글 작성 중 오류 발생: {exc}") from exc
+
+
+@app.put(
+    "/api/comments/{comment_id}",
+    summary="댓글 수정(작성자 본인)",
+    description="author_token이 작성자와 일치할 때만 댓글 내용을 수정합니다.",
+)
+async def update_comment(comment_id: int, request: CommentUpdateRequest):
+    content = (request.content or "").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="댓글 내용이 비어 있습니다.")
+
+    if USE_DUMMY:
+        return {"comment": {"comment_id": comment_id, "content": content, "created_at": "", "is_mine": True}}
+
+    database = _require_db()
+    try:
+        comment = database.update_comment(comment_id, content, request.author_token)
+        if comment is None:
+            raise HTTPException(status_code=403, detail="본인 댓글만 수정할 수 있습니다.")
+        return {"comment": comment}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"댓글 수정 중 오류 발생: {exc}") from exc
+
+
+@app.delete(
+    "/api/comments/{comment_id}",
+    summary="댓글 삭제(작성자 본인)",
+    description="author_token이 작성자와 일치할 때만 댓글을 삭제합니다.",
+)
+async def delete_comment(comment_id: int, author_token: str = Query(...)):
+    if USE_DUMMY:
+        return {"ok": True}
+
+    database = _require_db()
+    try:
+        deleted = database.delete_comment(comment_id, author_token)
+        if not deleted:
+            raise HTTPException(status_code=403, detail="본인 댓글만 삭제할 수 있습니다.")
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"댓글 삭제 중 오류 발생: {exc}") from exc

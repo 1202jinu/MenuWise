@@ -13,6 +13,23 @@ DEFAULT_MENU_PRICE = 0
 APIFY_REVIEW_LIMIT_PER_PLACE = 40
 APIFY_PHOTO_LIMIT_PER_PLACE = 30
 
+# AI가 "리뷰에 언급이 없다 / 정보가 부족하다"는 식으로 만들어 내는 내용 없는 문장들.
+# 실제 리뷰에서 뽑은 장단점이 아니므로 core_info에 저장하지 않는다(프론트는 '리뷰 없음' 안내를 띄운다).
+FILLER_CORE_INFO_MARKERS = (
+    "언급되지", "언급이 없", "언급은 없", "언급 없", "언급은 없었", "언급이 없었",
+    "정보가 부족", "정보가 없", "정보는 없", "정보에 대한 평가가 어렵",
+    "확인되지", "확인할 수 없", "알 수 없", "찾을 수 없",
+    "나타나지 않", "드러나지 않", "파악하기 어렵", "파악하기 힘들",
+    "특별한 단점", "특별한 장점", "별다른 단점", "별다른 장점",
+    "언급한 내용이 없", "언급된 내용이 없", "없어 정보", "평가가 어렵", "판단하기 어렵",
+)
+
+
+def is_filler_core_info(content):
+    """내용 없는 '언급 없음/정보 부족' 류의 문장이면 True."""
+    text = str(content or "")
+    return any(marker in text for marker in FILLER_CORE_INFO_MARKERS)
+
 
 def load_apify_reviews_from_file(path):
     """Apify Dataset에서 내려받은 JSON 파일을 읽는다."""
@@ -212,6 +229,23 @@ class MenuWiseDB:
             )
         """)
 
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS comments (
+                comment_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                info_id INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                author_token TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (info_id) REFERENCES core_info(info_id)
+            )
+        """)
+
+        # 구버전 DB 호환: comments에 author_token 컬럼이 없으면 추가한다(작성자 식별용).
+        cursor.execute("PRAGMA table_info(comments)")
+        comment_columns = {row[1] for row in cursor.fetchall()}
+        if "author_token" not in comment_columns:
+            cursor.execute("ALTER TABLE comments ADD COLUMN author_token TEXT")
+
         self.conn.commit()
     def clean_review_text(self, text):
         """리뷰 원문에서 불필요한 공백과 특수문자를 정리합니다."""
@@ -252,7 +286,7 @@ class MenuWiseDB:
         pros = level_1.get("pros")
         cons = level_1.get("cons")
 
-        if pros:
+        if pros and not is_filler_core_info(pros):
             transformed.append({
                 "menu_id": menu_id,
                 "content": pros,
@@ -262,7 +296,7 @@ class MenuWiseDB:
                 "downvotes": 0
             })
 
-        if cons:
+        if cons and not is_filler_core_info(cons):
             transformed.append({
                 "menu_id": menu_id,
                 "content": cons,
@@ -273,9 +307,12 @@ class MenuWiseDB:
             })
 
         for item in ai_result.get("level_2", []):
+            content = item.get("content", "")
+            if not content or is_filler_core_info(content):
+                continue
             transformed.append({
                 "menu_id": menu_id,
-                "content": item.get("content", ""),
+                "content": content,
                 "info_type": item.get("info_type", item.get("type", "PROS")),
                 "level": 2,
                 "upvotes": item.get("upvotes", 0),
@@ -733,6 +770,128 @@ class MenuWiseDB:
 
         return {"info_id": info_id, "upvotes": upvotes, "downvotes": downvotes}
 
+    def add_comment(self, info_id, content, author_token=None):
+        """장단점(core_info)에 댓글을 추가하고 저장된 댓글을 반환한다.
+
+        author_token은 작성자(기기)를 식별해 본인 댓글만 수정/삭제할 수 있게 한다.
+        """
+        content = str(content or "").strip()
+        if not content:
+            return None
+
+        author_token = (str(author_token).strip() or None) if author_token else None
+
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM core_info WHERE info_id = ?",
+            (info_id,),
+        )
+        if cursor.fetchone() is None:
+            return None
+
+        cursor.execute(
+            "INSERT INTO comments (info_id, content, author_token) VALUES (?, ?, ?)",
+            (info_id, content, author_token),
+        )
+        self.conn.commit()
+
+        comment_id = cursor.lastrowid
+        cursor.execute(
+            "SELECT comment_id, info_id, content, created_at FROM comments WHERE comment_id = ?",
+            (comment_id,),
+        )
+        row = cursor.fetchone()
+        return {
+            "comment_id": row[0],
+            "info_id": row[1],
+            "content": row[2],
+            "created_at": row[3],
+            "is_mine": True,
+        }
+
+    def get_comments(self, info_id, viewer_token=None):
+        """장단점(core_info)에 달린 댓글 목록을 오래된 순으로 반환한다.
+
+        viewer_token이 작성자 토큰과 일치하는 댓글은 is_mine=True로 표시해
+        프론트에서 본인 댓글에만 수정/삭제 버튼을 노출할 수 있게 한다.
+        """
+        viewer_token = str(viewer_token).strip() if viewer_token else ""
+
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT comment_id, info_id, content, created_at, author_token
+            FROM comments
+            WHERE info_id = ?
+            ORDER BY comment_id ASC
+            """,
+            (info_id,),
+        )
+        return [
+            {
+                "comment_id": row[0],
+                "info_id": row[1],
+                "content": row[2],
+                "created_at": row[3],
+                "is_mine": bool(viewer_token) and row[4] == viewer_token,
+            }
+            for row in cursor.fetchall()
+        ]
+
+    def update_comment(self, comment_id, content, author_token):
+        """본인(author_token 일치) 댓글의 내용을 수정한다. 권한이 없으면 None을 반환한다."""
+        content = str(content or "").strip()
+        author_token = str(author_token).strip() if author_token else ""
+        if not content or not author_token:
+            return None
+
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT author_token FROM comments WHERE comment_id = ?",
+            (comment_id,),
+        )
+        row = cursor.fetchone()
+        if row is None or row[0] != author_token:
+            return None
+
+        cursor.execute(
+            "UPDATE comments SET content = ? WHERE comment_id = ?",
+            (content, comment_id),
+        )
+        self.conn.commit()
+
+        cursor.execute(
+            "SELECT comment_id, info_id, content, created_at FROM comments WHERE comment_id = ?",
+            (comment_id,),
+        )
+        updated = cursor.fetchone()
+        return {
+            "comment_id": updated[0],
+            "info_id": updated[1],
+            "content": updated[2],
+            "created_at": updated[3],
+            "is_mine": True,
+        }
+
+    def delete_comment(self, comment_id, author_token):
+        """본인(author_token 일치) 댓글을 삭제한다. 권한이 없으면 False를 반환한다."""
+        author_token = str(author_token).strip() if author_token else ""
+        if not author_token:
+            return False
+
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT author_token FROM comments WHERE comment_id = ?",
+            (comment_id,),
+        )
+        row = cursor.fetchone()
+        if row is None or row[0] != author_token:
+            return False
+
+        cursor.execute("DELETE FROM comments WHERE comment_id = ?", (comment_id,))
+        self.conn.commit()
+        return True
+
     def delete_menus_by_names(self, names):
         """곁들임/밑반찬 등 제외 대상 메뉴를 삭제한다(연결된 core_info 삭제, 리뷰는 menu_id 해제)."""
         cursor = self.conn.cursor()
@@ -796,7 +955,8 @@ class MenuWiseDB:
             return None
 
         cursor.execute("""
-            SELECT info_id, menu_id, content, info_type, level, upvotes, downvotes
+            SELECT info_id, menu_id, content, info_type, level, upvotes, downvotes,
+                   (SELECT COUNT(*) FROM comments c WHERE c.info_id = core_info.info_id) AS comment_count
             FROM core_info
             WHERE menu_id = ?
             ORDER BY (upvotes - downvotes) DESC, level ASC, info_id ASC
@@ -813,7 +973,8 @@ class MenuWiseDB:
                 "info_type": row[3],
                 "level": row[4],
                 "upvotes": row[5],
-                "downvotes": row[6]
+                "downvotes": row[6],
+                "comment_count": row[7]
             })
 
         return {

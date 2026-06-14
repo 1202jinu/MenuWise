@@ -104,7 +104,9 @@ async def enrich_all():
     processor = MenuAIProcessor()
 
     restaurants = db.get_all_restaurants()
-    print(f"보강 대상 식당: {len(restaurants)}개 (DB: {db_path})")
+    # FORCE_REENRICH=1이면 전체 재정제, 기본은 아직 메뉴가 없는 식당만 정제(증분).
+    force = os.getenv("FORCE_REENRICH", "0").lower() in {"1", "true", "yes", "y"}
+    print(f"보강 대상 식당: {len(restaurants)}개 (DB: {db_path}) | 모드: {'전체 재정제' if force else '미정제만'}")
 
     total_menus = 0
 
@@ -112,6 +114,15 @@ async def enrich_all():
         res_id = restaurant["res_id"]
         res_name = restaurant["res_name"]
         print(f"[{index}/{len(restaurants)}] {res_name}")
+
+        if not force:
+            cursor = db.conn.cursor()
+            already = cursor.execute(
+                "SELECT COUNT(*) FROM menus WHERE res_id = ?", (res_id,)
+            ).fetchone()[0]
+            if already > 0:
+                print("  - 이미 정제됨. 건너뜀.")
+                continue
 
         reviews = db.get_reviews_by_restaurant(res_id)
         if not reviews:
